@@ -1,0 +1,37 @@
+diff --git a/ggml/include/ggml.h b/ggml/include/ggml.h
+index 224bdef92..21d728610 100644
+--- a/ggml/include/ggml.h
++++ b/ggml/include/ggml.h
+@@ -430,7 +430,11 @@ extern "C" {
+         GGML_TYPE_NVFP4   = 40, // NVFP4 (4 blocks, E4M3 scale)
+         GGML_TYPE_Q1_0    = 41,
+         GGML_TYPE_Q2_0    = 42,
+-        GGML_TYPE_COUNT   = 43,
++        // 43..65 are reserved (unused). Type 66 is a load-only stub for the
++        // Kimi-K3 "UD-Q1_0" quant (format not implemented); it lets GGUF files
++        // using it be parsed and paged, but no compute kernels exist for it.
++        GGML_TYPE_KIMI_Q1_0 = 66,
++        GGML_TYPE_COUNT   = 67,
+     };
+ 
+     // [TAG_GGML_PREC]
+diff --git a/ggml/src/ggml.c b/ggml/src/ggml.c
+index cdc10a759..add3ac9a3 100644
+--- a/ggml/src/ggml.c
++++ b/ggml/src/ggml.c
+@@ -690,6 +690,15 @@ static const struct ggml_type_traits type_traits[GGML_TYPE_COUNT] = {
+         .to_float                 = (ggml_to_float_t) dequantize_row_q2_0,
+         .from_float_ref           = (ggml_from_float_t) quantize_row_q2_0_ref,
+     },
++    [GGML_TYPE_KIMI_Q1_0] = {
++        // load-only stub for Kimi-K3 "UD-Q1_0": the real bytes/element ratio is
++        // 19/128 (measured from the model), so GGUF contiguity checks and the
++        // pager's per-tensor sizes are correct; no dequant kernels exist
++        .type_name                = "kimi_q1_0",
++        .blck_size                = 128,
++        .type_size                = 19,
++        .is_quantized             = true,
++    },
+     [GGML_TYPE_Q4_0] = {
+         .type_name                = "q4_0",
+         .blck_size                = QK4_0,
