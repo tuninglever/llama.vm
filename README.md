@@ -71,7 +71,7 @@ patches/apply-llama.cpp-patches.sh /path/to/llama.cpp
 cmake --build /path/to/llama.cpp/build --target ggml-base ggml -j
 
 # 2. build llama.vm
-cmake -S . -B build -DLLlamaVM_LLAMA_CPP_DIR=/path/to/llama.cpp
+cmake -S . -B build -DLlamaVM_LLAMA_CPP_DIR=/path/to/llama.cpp
 cmake --build build -j
 
 # 3. run the tests (test_gguf/test_llama_integration need a model and auto-skip otherwise)

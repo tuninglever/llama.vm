@@ -197,7 +197,7 @@ design.md, planning.md        original design and roadmap
 
 ## Build and test
 Requires a llama.cpp tree with prebuilt ggml libraries, passed with
-`-DLLlamaVM_LLAMA_CPP_DIR=/path/to/llama.cpp`.
+`-DLlamaVM_LLAMA_CPP_DIR=/path/to/llama.cpp`.
 
 Note: llama.cpp may need a small **load-only stub for ggml type 66**
 (`GGML_TYPE_KIMI_Q1_0`, see `patches/ggml-type66-kimi-q1-0-stub.patch`). Kimi-K3's
@@ -206,7 +206,7 @@ Note: llama.cpp may need a small **load-only stub for ggml type 66**
 Rebuild the ggml libs after touching it: `cmake --build <llama.cpp>/build --target ggml-base ggml -j`.
 
 ```sh
-cmake -S . -B build -DLLlamaVM_LLAMA_CPP_DIR=/path/to/llama.cpp
+cmake -S . -B build -DLlamaVM_LLAMA_CPP_DIR=/path/to/llama.cpp
 cmake --build build -j
 
 # unit tests (test_gguf needs a model; set LLAMA_VM_TEST_MODEL or it auto-skips)
