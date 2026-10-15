@@ -63,7 +63,7 @@ design.md, planning.md        original design and roadmap
 
 ## Building
 
-Requires a llama.cpp tree with prebuilt ggml libraries.
+Requires a llama.cpp tree, built and with prebuilt ggml libraries.
 
 ```sh
 # 1. (optional) apply the llama.cpp patches for the full feature set
@@ -119,7 +119,7 @@ export LLAMA_VM_VRAM=3G          # the VRAM window: one batch's weights
 export LLAMA_VM_GGUF=/path/to/model.gguf   # file mode: fault weights from the model file
 # capture mode instead: unset LLAMA_VM_GGUF; set LLAMA_VM_RAM=<budget> and, if the
 # budget is below the model size, LLAMA_VM_SWAP=/path/to/swap-file
-llama-server -m /path/to/model.gguf --device LLAMA_VM_GPU -ot '.*=LLAMA_VM_GPU' -ngl 99 --port 8123
+llama-server -m /path/to/model.gguf --device LLAMA_VM_GPU -ot '.*=LLAMA_VM_GPU' -ngl 99 --port 8123 --load-mode mmap --model-dir /path/to/models
 ```
 
 The wrapper splits the graph into batches — the longest run of consecutive ops
