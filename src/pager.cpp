@@ -114,10 +114,9 @@ namespace llama_vm {
         if (swap_fd >= 0) {
             close(swap_fd);
         }
-        for (auto & r : regions) {
-            if (r.fd >= 0) {
-                close(r.fd);
-            }
+        for (auto & [path, fd] : file_fds) {
+            (void) path;
+            close(fd);
         }
     }
 
@@ -636,8 +635,20 @@ namespace llama_vm {
         std::lock_guard<std::mutex> lock(p->mutex);
         require(size > 0, "empty region");
         require(p->tensor_by_name.count(name) == 0, "region name already in use");
-        const int fd = open(file.c_str(), O_RDONLY);
-        require(fd >= 0, "failed to open region file");
+        // share one fd per backing file (see file_fds): a sharded model has one
+        // region per tensor, and per-region fds exhaust the fd limit on big models
+        int fd;
+        auto fft = p->file_fds.find(file);
+        if (fft != p->file_fds.end()) {
+            fd = fft->second;
+        } else {
+            fd = open(file.c_str(), O_RDONLY);
+            if (fd < 0) {
+                std::string msg = "failed to open region file: " + file + " (" + std::strerror(errno) + ")";
+                throw std::runtime_error(msg);
+            }
+            p->file_fds[file] = fd;
+        }
         const auto fsz = static_cast<size_t>(lseek(fd, 0, SEEK_END));
         require(file_offset + size <= fsz, "region exceeds file size");
 

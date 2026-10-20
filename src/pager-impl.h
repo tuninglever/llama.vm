@@ -84,6 +84,10 @@ namespace llama_vm {
         std::vector<region>   regions;
         std::vector<tensor_info> tensors;
         std::map<std::string, size_t> tensor_by_name;
+        // one open fd per backing file, shared by all regions over that file (a
+        // sharded model has one region per tensor, so per-region fds would exhaust
+        // the process fd limit on big models); reads use pread, so sharing is safe
+        std::map<std::string, int> file_fds;
         size_t                virtual_size = 0;
 
         // metadata from GGUF
