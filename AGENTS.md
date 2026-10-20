@@ -158,7 +158,9 @@ design.md, planning.md        original design and roadmap
   as one real graph on the inner backend, and synchronizes once. View/reshape/permute/
   transpose/empty/none nodes are skipped only as single-node batches (the inner backend
   hangs on them as single-node graphs); inside a multi-node batch they are fine. The
-  inner compute backend is chosen by `LLAMA_VM_GPU=auto|hip|cuda|vulkan|cpu`. A weight is
+  inner compute backend is chosen by `LLAMA_VM_GPU=auto|hip|cuda|vulkan|cpu`, optionally
+  with a device index within the backend (`cuda1` = the second CUDA device, registration
+  order); the VRAM window is allocated on that same physical device. A weight is
   only resident while its batch runs, so the window holds one batch's weights (plus
   nothing else: activations live in the inner buft). `test_gpu_buffer` exercises the
   buffer + wrapper (dedupe, pin boundary, cross-batch reuse) with `vram_backend = "cpu"`;
@@ -276,16 +278,17 @@ through llama.cpp (see the *GPU weight buffer* architecture entry):
 export LD_LIBRARY_PATH=$PWD/build:/usr/local/lib
 export GGML_BACKEND_PATH=$PWD/build/libggml-llamavm-gpu.so
 export GGML_CUDA_DISABLE_GRAPHS=1
-export LLAMA_VM_GPU=hip          # inner compute backend (auto|hip|cuda|vulkan|cpu)
+export LLAMA_VM_GPU=hip          # inner compute backend (auto|hip|cuda|vulkan|cpu,
+                                 # optionally with a device index: cuda1 = 2nd CUDA device)
 export LLAMA_VM_VRAM=3G          # the VRAM window: one batch's weights
 export LLAMA_VM_GGUF=/path/to/model.gguf    # file mode: fault weights from the model file
 # capture mode instead: unset LLAMA_VM_GGUF; set LLAMA_VM_RAM=<budget> and, if the
 # budget is below the model size, LLAMA_VM_SWAP=/path/to/swap-file
 llama-cli -m /path/to/model.gguf --device LLAMA_VM_GPU -ot '.*=LLAMA_VM_GPU' -ngl 99 \
-          --n-predict 1 --prompt "Hi" --temp 0 --single-turn
+          --load-mode none --n-predict 1 --prompt "Hi" --temp 0 --single-turn
 # or the server (the objective's acceptance path):
 llama-server -m /path/to/model.gguf --device LLAMA_VM_GPU -ot '.*=LLAMA_VM_GPU' -ngl 99 \
-             --port 8123
+             --load-mode none --port 8123
 curl -s http://127.0.0.1:8123/completion \
      -d '{"prompt":"Hi","n_predict":1,"temperature":0,"stream":false}'
 ```

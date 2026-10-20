@@ -96,7 +96,8 @@ Without them, core paging over standard GGUF still works.
 ```sh
 build/llama-vm info   <model.gguf> [--ram 64M] [--vram 32M] [--page 4M] [--backend cpu]
 build/llama-vm verify <model.gguf> [--ram 16M] [--vram 64M] [--tensor NAME]
-build/llama-vm bench  <model.gguf> [--ram 32M] [--pattern seq|rand] [--pass N] [--swap FILE]
+build/llama-vm bench  <model.gguf> [--ram 32M] [--vram 32M] [--backend cuda] [--pattern seq|rand] [--pass N] [--swap FILE]
+build/llama-vm pages  <model.gguf> [--ram 64M] [--vram 32M] [--page 4M] [--backend cpu]
 build/llama-vm plan   <model.gguf> --ram AVAIL_RAM --vram AVAIL_VRAM
 build/llama-vm tiered <model.gguf> --ram 1G --vram 1G --backend hip
 build/llama-vm demo
@@ -113,14 +114,41 @@ user-capped VRAM window:
 ```sh
 export LD_LIBRARY_PATH=$PWD/build:/usr/local/lib
 export GGML_BACKEND_PATH=$PWD/build/libggml-llamavm-gpu.so
-export GGML_CUDA_DISABLE_GRAPHS=1
-export LLAMA_VM_GPU=hip          # inner compute backend (auto|hip|cuda|vulkan|cpu)
-export LLAMA_VM_VRAM=3G          # the VRAM window: one batch's weights
+export GGML_CUDA_DISABLE_GRAPHS=1   # CUDA only: the wrapper re-points weight pointers per batch
+export LLAMA_VM_GPU=cuda            # inner compute backend: auto|hip|cuda|vulkan|cpu,
+                                    # optionally with a device index (cuda1 = 2nd CUDA device)
+export LLAMA_VM_VRAM=3G             # the VRAM window: one batch's weights
 export LLAMA_VM_GGUF=/path/to/model.gguf   # file mode: fault weights from the model file
 # capture mode instead: unset LLAMA_VM_GGUF; set LLAMA_VM_RAM=<budget> and, if the
 # budget is below the model size, LLAMA_VM_SWAP=/path/to/swap-file
-llama-server -m /path/to/model.gguf --device LLAMA_VM_GPU -ot '.*=LLAMA_VM_GPU' -ngl 99 --port 8123 --load-mode mmap --model-dir /path/to/models
+llama-server -m /path/to/model.gguf --device LLAMA_VM_GPU -ot '.*=LLAMA_VM_GPU' \
+             -ngl 99 --load-mode none --port 8123
 ```
+
+**Device selection.** `--device` must be the wrapper device name `LLAMA_VM_GPU`
+(it appears in `llama-server --list-devices`). Do not pass a plain device name
+(e.g. `CUDA1`): the pager's compute path lives in the wrapper, so a plain device
+aborts on the first graph (`pre-allocated tensor ... in a buffer (LLAMA_VM_GPU)
+that cannot run the operation`). The *physical* GPU is chosen by the
+`LLAMA_VM_GPU` env var: `cuda` picks the first CUDA device, `cuda1` the second
+(registration order, i.e. the `--list-devices` order); `CUDA_VISIBLE_DEVICES`
+reorders as usual.
+
+**Window sizing.** `LLAMA_VM_VRAM` must be at least the largest *plain* tensor of
+the model (eg. `token_embd.weight` / `output.weight`); a window below it throws
+at the first fault. MoE expert tensors are paged as per-expert slices, so the
+window does not need to hold a whole expert tensor.
+
+**Split models.** Pass the **first shard** to `-m` (and `LLAMA_VM_GGUF`); the
+pager derives the sibling shards (`-00002-of-00005.gguf`, ...) itself.
+
+Use `--load-mode none`: with mmap (the `auto` default) the loader swaps any buft
+that is a device's host buffer type for the stock CPU buft, which would silently
+disable demand paging.
+
+If the inner backend's `.so` is not in the llama.cpp build (eg. a CPU-only
+llama.cpp plus a separately built `libggml-cuda.so`), point
+`LLAMA_VM_BACKEND_DIR` at the directory containing it.
 
 The wrapper splits the graph into batches — the longest run of consecutive ops
 whose unique weight tensors can be resident in the window at once — faults those

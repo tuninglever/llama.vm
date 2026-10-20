@@ -260,7 +260,11 @@ namespace {
         config cfg;
         cfg.page_size     = buffer_page_size();
         cfg.vram_capacity = align4k(vram_window);
-        cfg.vram_backend  = gpu_target();
+        // the window must live on the same physical device as the inner compute
+        // device, so pass the inner device's exact name (eg. "CUDA1") rather than
+        // the bare backend name (which would pick the first device of the type)
+        cfg.vram_backend  = S().inner_dev != nullptr ? ggml_backend_dev_name(S().inner_dev)
+                                                     : gpu_target();
         cfg.prefetch      = false;
 
         pager * pg = nullptr;
@@ -308,7 +312,7 @@ namespace {
         }
         if (pg->tier_base(tier::vram) == nullptr) {
             std::fprintf(stderr, "llama.vm GPU buffer: failed to allocate the VRAM window (%s backend)\n",
-                         gpu_target().c_str());
+                         cfg.vram_backend.c_str());
             delete pg;
             return nullptr;
         }
@@ -322,9 +326,11 @@ namespace {
     const struct ggml_backend_buffer_type_i buft_iface = {
         /* .get_name       = */ buf_get_name,
         /* .alloc_buffer   = */ buf_alloc,
+        /* .alloc_buffer_n = */ nullptr,
         /* .get_alignment  = */ buf_get_alignment,
         /* .get_max_size   = */ nullptr,
         /* .get_alloc_size = */ nullptr,
+        /* .get_alloc_size_n = */ nullptr,
         /* .is_host        = */ buf_is_host,
     };
 
@@ -357,10 +363,10 @@ namespace {
 
     // debug heartbeat (LLAMA_VM_DEBUG=1): op progress to a separate file
     FILE * dbg_file() {
-        static FILE * f = [] -> FILE * {
+        static FILE * f = [] {
             const char * e = std::getenv("LLAMA_VM_DEBUG");
             if (e == nullptr || e[0] != '1') {
-                return nullptr;
+                return static_cast<FILE *>(nullptr);
             }
             return std::fopen("/tmp/llamavm_debug.log", "w");
         }();
@@ -821,7 +827,11 @@ namespace {
     }
     ggml_backend_buffer_type_t memdev_get_host_buffer_type(ggml_backend_dev_t dev) {
         (void) dev;
-        return &S().buft;
+        // must be nullptr: the model loader swaps a buft for the stock CPU buft when it
+        // is the host buffer type of its device (llama-model-loader.cpp, "avoid using a
+        // host buffer when using mmap"). reporting the paged buft here would silently
+        // disable demand paging under --load-mode mmap/auto
+        return nullptr;
     }
     bool memdev_supports_op(ggml_backend_dev_t dev, const struct ggml_tensor * op) {
         (void) dev;
@@ -907,44 +917,59 @@ namespace {
         s.wired           = true;
     }
 
-    // find the inner compute device for the LLAMA_VM_GPU target
-    ggml_backend_dev_t find_inner_device() {
-        const std::string target = gpu_target();
-        const char * prefix = nullptr;
-        if (target == "hip") {
-            prefix = "ROCm";
-        } else if (target == "cuda") {
-            prefix = "CUDA";
-        } else if (target == "vulkan") {
-            prefix = "Vulkan";
-        } else if (target == "cpu") {
-            prefix = "CPU";
-        }
-        if (prefix != nullptr) {
-            for (size_t i = 0; i < ggml_backend_dev_count(); ++i) {
-                ggml_backend_dev_t dev = ggml_backend_dev_get(i);
-                if (dev == &S().device || dev == &S().mem_device) {
-                    continue;
-                }
-                const char * nm = ggml_backend_dev_name(dev);
-                if (nm != nullptr && std::strncmp(nm, prefix, std::strlen(prefix)) == 0) {
+    // the idx-th device (in registration order, i.e. the order --list-devices
+    // shows) whose name starts with prefix, skipping the wrapper's own devices
+    ggml_backend_dev_t nth_device(const char * prefix, size_t idx) {
+        size_t seen = 0;
+        for (size_t i = 0; i < ggml_backend_dev_count(); ++i) {
+            ggml_backend_dev_t dev = ggml_backend_dev_get(i);
+            if (dev == &S().device || dev == &S().mem_device) {
+                continue;
+            }
+            const char * nm = ggml_backend_dev_name(dev);
+            if (nm != nullptr && std::strncmp(nm, prefix, std::strlen(prefix)) == 0) {
+                if (seen++ == idx) {
                     return dev;
                 }
             }
-            if (target == "hip") {
+        }
+        return nullptr;
+    }
+
+    // find the inner compute device for the LLAMA_VM_GPU target. the target is
+    // auto|hip|cuda|vulkan|cpu, optionally followed by a device index within the
+    // backend: "cuda1" selects the second CUDA device, "hip0" the first ROCm one
+    ggml_backend_dev_t find_inner_device() {
+        const std::string target = gpu_target();
+        std::string base = target;
+        size_t idx = 0;
+        const size_t n0 = base.find_first_not_of("abcdefghijklmnopqrstuvwxyz");
+        if (n0 != std::string::npos && n0 > 0) {
+            idx = std::strtoul(base.c_str() + n0, nullptr, 10);
+            base.resize(n0);
+        }
+        const char * prefix = nullptr;
+        if (base == "hip") {
+            prefix = "ROCm";
+        } else if (base == "cuda") {
+            prefix = "CUDA";
+        } else if (base == "vulkan") {
+            prefix = "Vulkan";
+        } else if (base == "cpu") {
+            prefix = "CPU";
+        }
+        if (prefix != nullptr) {
+            ggml_backend_dev_t dev = nth_device(prefix, idx);
+            if (dev == nullptr && base == "hip") {
                 // a HIP build registers its device as "ROCm"; retry with the bare name
-                for (size_t i = 0; i < ggml_backend_dev_count(); ++i) {
-                    ggml_backend_dev_t dev = ggml_backend_dev_get(i);
-                    if (dev == &S().device || dev == &S().mem_device) {
-                        continue;
-                    }
-                    const char * nm = ggml_backend_dev_name(dev);
-                    if (nm != nullptr && std::strncmp(nm, "HIP", 3) == 0) {
-                        return dev;
-                    }
-                }
+                dev = nth_device("HIP", idx);
             }
-            return nullptr;
+            return dev;
+        }
+        if (base != "auto") {
+            std::fprintf(stderr, "llama.vm GPU backend: unknown LLAMA_VM_GPU target '%s' (use "
+                                 "auto|hip|cuda|vulkan|cpu, optionally with a device index, eg. cuda1); "
+                                 "falling back to auto\n", target.c_str());
         }
         // auto: the first discrete or integrated GPU
         for (size_t i = 0; i < ggml_backend_dev_count(); ++i) {

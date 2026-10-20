@@ -161,6 +161,14 @@ static std::unique_ptr<pager> make_pager(const args & a) {
     }
 }
 
+// true when a tier's data pointer can be dereferenced from the host: the RAM tier
+// always, the VRAM tier only when its buffer is host-writable (a host buffer or an
+// iGPU under the HMM). on a discrete GPU the VRAM pointer is a device pointer and
+// must not be touched from host code — use the safe read() path instead
+static bool tier_host_readable(const pager & pg, tier t) {
+    return t == tier::ram || pg.vram_cpu_accessible();
+}
+
 static void print_stats(const stats & st, double secs) {
     std::printf("  page faults:   %llu\n", (unsigned long long) st.n_fault);
     std::printf("  tier copies:   %llu\n", (unsigned long long) st.n_tier_copy);
@@ -235,6 +243,7 @@ static int cmd_verify(const args & a) {
 
     char buf[1 << 20];
     size_t n_ok = 0, n_fail = 0;
+    const bool host_readable = tier_host_readable(*pg, t);
     auto t0 = std::chrono::steady_clock::now();
     for (const tensor_info & ti : pg->tensors()) {
         if (!a.tensor.empty() && ti.name != a.tensor) {
@@ -245,11 +254,19 @@ static int cmd_verify(const args & a) {
             ++n_fail;
             continue;
         }
-        void * d = pg->tensor_data(ti.name, t);
-        if (d == nullptr) {
-            std::fprintf(stderr, "FAIL: could not materialize %s\n", ti.name.c_str());
-            ++n_fail;
-            continue;
+        // on a host-readable tier the tensor is materialized into the tier and the
+        // returned pointer compared directly; on a discrete-GPU VRAM tier the pointer
+        // is a device pointer, so the safe read() path is used instead (it also keeps
+        // working when the tensor is larger than the window)
+        void * d = nullptr;
+        if (host_readable) {
+            try {
+                d = pg->tensor_data(ti.name, t);
+            } catch (const std::exception & e) {
+                std::fprintf(stderr, "FAIL: could not materialize %s: %s\n", ti.name.c_str(), e.what());
+                ++n_fail;
+                continue;
+            }
         }
         size_t done = 0;
         bool ok = true;
@@ -263,9 +280,18 @@ static int cmd_verify(const args & a) {
                 ok = false;
                 break;
             }
-            if (std::memcmp(buf, static_cast<char *>(d) + done, n) != 0) {
-                ok = false;
-                break;
+            if (host_readable) {
+                if (std::memcmp(buf, static_cast<char *>(d) + done, n) != 0) {
+                    ok = false;
+                    break;
+                }
+            } else {
+                char vbuf[1 << 20];
+                pg->read(ti.vaddr + done, vbuf, n);
+                if (std::memcmp(buf, vbuf, n) != 0) {
+                    ok = false;
+                    break;
+                }
             }
             done += n;
         }
@@ -302,15 +328,20 @@ static int cmd_bench(const args & a) {
                 a.model.c_str(), n, a.page >> 10,
                 t == tier::vram ? "vram" : "ram", a.pattern.c_str(), a.pass);
 
+    const bool host_readable = tier_host_readable(*pg, t);
     std::mt19937_64 rng(1234);
     auto t0 = std::chrono::steady_clock::now();
     for (int pass = 0; pass < a.pass; ++pass) {
         for (size_t i = 0; i < n; ++i) {
             const size_t pid = a.pattern == "rand" ? rng() % n : i;
             void * d = pg->resolve_page(pid, t);
-            // touch a few bytes so nothing gets optimized away
-            volatile char c = static_cast<char *>(d)[0];
-            (void) c;
+            if (host_readable) {
+                // touch a few bytes so nothing gets optimized away
+                volatile char c = static_cast<char *>(d)[0];
+                (void) c;
+            } else {
+                (void) d; // device pointer: must not be dereferenced from the host
+            }
         }
     }
     auto t1 = std::chrono::steady_clock::now();
@@ -387,6 +418,10 @@ static int cmd_tiered(const args & a) {
     std::printf("  vram   : %zu MiB (%s)\n", a.vram >> 20, a.backend.c_str());
     std::printf("  paging : %s\n", model > a.ram + a.vram ? "yes (model > ram+vram)" : "NO (model fits in the tiers)");
 
+    // the VRAM pointer is a device pointer on a discrete GPU and must not be
+    // dereferenced from host code (phase 3 verifies the bytes via the safe read path)
+    const bool vram_readable = tier_host_readable(*pg, tier::vram);
+
     // Phase 1: fault every page into RAM. When the model exceeds the RAM capacity this
     // forces LRU evictions back to the source file (the pages stream through the RAM tier).
     auto t0 = std::chrono::steady_clock::now();
@@ -403,8 +438,11 @@ static int cmd_tiered(const args & a) {
     auto t1 = std::chrono::steady_clock::now();
     for (size_t i = 0; i < n; ++i) {
         void * d = pg->resolve_page(i, tier::vram);
-        volatile char c = static_cast<char *>(d)[0];
-        (void) c;
+        if (vram_readable) {
+            volatile char c = static_cast<char *>(d)[0]; // (void) d otherwise
+        } else {
+            (void) d;
+        }
     }
     const double s2 = std::chrono::duration<double>(std::chrono::steady_clock::now() - t1).count();
 

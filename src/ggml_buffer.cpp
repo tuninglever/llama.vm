@@ -169,9 +169,11 @@ namespace {
     const struct ggml_backend_buffer_type_i buft_iface = {
         /* .get_name       = */ buf_get_name,
         /* .alloc_buffer   = */ buf_alloc,
+        /* .alloc_buffer_n = */ nullptr,
         /* .get_alignment  = */ buf_get_alignment,
         /* .get_max_size   = */ nullptr,
         /* .get_alloc_size = */ nullptr,
+        /* .get_alloc_size_n = */ nullptr,
         /* .is_host        = */ buf_is_host,
     };
 

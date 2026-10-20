@@ -25,7 +25,8 @@ namespace llama_vm {
         // VRAM tier capacity in bytes, 0 = disabled
         size_t vram_capacity = 0;
 
-        // VRAM backend: "auto" | "hip" | "cuda" | "vulkan" | "cpu"
+        // VRAM backend: "auto" | "hip" | "cuda" | "vulkan" | "cpu" (the first device of
+        // that type), or an exact device name (eg. "CUDA1") to pick a specific device.
         // "cpu" allocates a plain host buffer, useful for testing paging logic without a GPU
         std::string vram_backend = "auto";
 
@@ -165,7 +166,14 @@ namespace llama_vm {
         // to its data inside the tier buffer. treat it as read-only: to modify a page use
         // write(), which also marks it dirty. the pointer stays valid until the page is evicted,
         // which can happen on any later pager operation that needs space, so copy the data out
-        // if it must outlive the call; or use read() which is always safe
+        // if it must outlive the call; or use read() which is always safe.
+        //
+        // the pointer is only dereferenceable from the host when the tier's buffer is
+        // host-accessible: always for the RAM tier, and for the VRAM tier only when
+        // vram_cpu_accessible() is true (a host buffer or an iGPU under the HMM). on a
+        // discrete GPU the VRAM tier is device memory: the pointer must not be
+        // dereferenced from host code (the data is copied with the backend's tensor
+        // set/get, which is what the pager uses internally)
         void * resolve_page(size_t page_id, tier t);
 
         // contiguous view of a whole tensor in the given tier, faults in all of its pages.

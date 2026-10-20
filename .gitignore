@@ -1,5 +1,7 @@
 build/
+build-dbg/
 *.o
 *.so.*
 core
 core.*
+.#*

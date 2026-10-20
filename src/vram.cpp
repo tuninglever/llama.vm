@@ -44,8 +44,24 @@ namespace llama_vm {
             }
             return nullptr;
         };
+        // an exact device name (eg. "CUDA1") selects that specific device; the plain
+        // backend names below select the first device of the type
+        auto find_exact = [](const char * name) -> struct ggml_backend * {
+            for (size_t i = 0; i < ggml_backend_dev_count(); ++i) {
+                ggml_backend_dev_t dev = ggml_backend_dev_get(i);
+                const char * nm = ggml_backend_dev_name(dev);
+                if (nm != nullptr && std::strcmp(nm, name) == 0) {
+                    return ggml_backend_init_by_name(nm, nullptr);
+                }
+            }
+            return nullptr;
+        };
         struct ggml_backend * backend = nullptr;
-        if (cfg.vram_backend == "auto") {
+        const bool is_backend_name = cfg.vram_backend == "auto" || cfg.vram_backend == "hip"
+            || cfg.vram_backend == "cuda" || cfg.vram_backend == "vulkan" || cfg.vram_backend == "cpu";
+        if (!is_backend_name) {
+            backend = find_exact(cfg.vram_backend.c_str());
+        } else if (cfg.vram_backend == "auto") {
             backend = ggml_backend_init_best();
         } else if (cfg.vram_backend == "hip") {
             backend = find_backend("ROCm");
