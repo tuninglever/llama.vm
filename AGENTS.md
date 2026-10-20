@@ -331,6 +331,19 @@ operational notes from this run:
   bandwidth-bound re-read, not a correctness issue — an earlier "hang" was just this
   slowness.
 
+Also validated on a **discrete CUDA** GPU (Quadro P6000, selected with
+`LLAMA_VM_GPU=cuda1`) with a sharded 155 GB MoE model: DeepSeek-V4-Flash
+`UD-Q4_K_XL` (5 shards, `deepseek4` arch, MXFP4 weights, MLA) through a **3 GiB
+window** (52x smaller than the model) — `llama-server -c 4096` starts and a
+completion returns coherent text (4 tokens in ~8 min). Two notes from this run:
+
+- **Pass an explicit `-c`.** The model advertises a 1M context; without `-c` the
+  server sized a 21.5 GiB KV cache and OOM'd on the 24 GB card (the window and the
+  other tenant's allocation leave ~6.9 GiB). `-c 4096` gives a ~2.2 GiB KV cache.
+- **The first completion is disk-bound.** The 155 GB working set does not fit in the
+  page cache (62 GiB RAM), so every graph re-reads it from the NVMe (~5.8 GiB/s
+  sequential; effective fault rate lower on 4 MiB reads). Expected, not a bug.
+
 ## Performance findings (Radeon 890M APU, iGPU)
 
 Measured on a 28 GB Qwen3.6-27B Q8_0 (model on the page cache):
