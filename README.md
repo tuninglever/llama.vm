@@ -117,6 +117,7 @@ export GGML_BACKEND_PATH=$PWD/build/libggml-llamavm-gpu.so
 export GGML_CUDA_DISABLE_GRAPHS=1   # CUDA only: the wrapper re-points weight pointers per batch
 export LLAMA_VM_GPU=cuda            # inner compute backend: auto|hip|cuda|vulkan|cpu,
                                     # optionally with a device index (cuda1 = 2nd CUDA device)
+                                    # run "llama-server --list-devices" to see the options
 export LLAMA_VM_VRAM=3G             # the VRAM window: one batch's weights
 export LLAMA_VM_GGUF=/path/to/model.gguf   # file mode: fault weights from the model file
 # capture mode instead: unset LLAMA_VM_GGUF; set LLAMA_VM_RAM=<budget> and, if the
