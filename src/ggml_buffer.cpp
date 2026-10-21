@@ -166,14 +166,20 @@ namespace {
         return buffer;
     }
 
+    // alloc_buffer_n/get_alloc_size_n exist only in the newer ggml buffer type
+    // interface (GGML_BACKEND_API_VERSION >= 3); the initializers are positional
     const struct ggml_backend_buffer_type_i buft_iface = {
         /* .get_name       = */ buf_get_name,
         /* .alloc_buffer   = */ buf_alloc,
+#if GGML_BACKEND_API_VERSION >= 3
         /* .alloc_buffer_n = */ nullptr,
+#endif
         /* .get_alignment  = */ buf_get_alignment,
         /* .get_max_size   = */ nullptr,
         /* .get_alloc_size = */ nullptr,
+#if GGML_BACKEND_API_VERSION >= 3
         /* .get_alloc_size_n = */ nullptr,
+#endif
         /* .is_host        = */ buf_is_host,
     };
 
