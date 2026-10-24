@@ -29,7 +29,7 @@ The Llama Virtual Memory Manager (llama.vm) is designed to handle large language
 - Ensure compatibility with existing CUDA-based workflows
 
 ### 3.3 MLX
-- Consider adding support for MLX in the future as a low-priority item
+- MLX support (in progress - see NEXT_STEPS.md)
 
 ## 4. Testing and Validation
 - Use models of different sizes stored in `~/.cache/huggingface/hub` for testing

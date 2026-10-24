@@ -406,7 +406,37 @@ Measured on a 28 GB Qwen3.6-27B Q8_0 (model on the page cache):
    tensors preferentially, which the block-granular eviction already supports cheaply).
 6. **Swap hardening** — crash recovery (validity bitmap + `fdatasync`) is implemented;
    still handle disk-full on write-back gracefully (currently throws).
-7. **MLX backend** — low priority (see `planning.md`).
+7. **MLX backend** — in progress (see `planning.md`).
+
+Done since the last revision: concurrency stress test (`test_concurrent`), swap
+crash-recovery (`fdatasync` + validity bitmap), host-region support, the ggml buffer
+backend (`test_ggml_buffer`), llama.cpp integration — the buffer works as a weight
+buffer via `tensor_buft_overrides` (`test_llama_integration`) — the capacity governor
+(`plan_capacity`, `llama-vm plan`), real-GPU (ROCm/HIP) validation of the VRAM tier —
+`test_vram` and the new `llama-vm tiered` command both run a model larger than the tiers
+through RAM + VRAM + file and verify every page (27.7 GiB Qwen on a Radeon 890M APU) —
+**sharded GGUF support** (`from_gguf` loads split models, verified on DeepSeek-V4
+81 GiB / 3 shards and Kimi-K3 434 GiB / 11 shards) plus a **load-only ggml type-66 stub**
+for the Kimi-K3 `UD-Q1_0` quant (see `patches/ggml-type66-kimi-q1-0-stub.patch`) — and
+the **GPU weight buffer** (`LLAMA_VM_GPU`) that demand-pages weights into a user-capped
+VRAM window at compute time. With batch compute (fault a batch of ops' weights, compute
+as one real graph), `llama-server` (HIP) ran a 28 GB Qwen3.6-27B Q8_0 through a 3 GiB
+window — a completion took 2.4 s, pager stats faults=30760 / evicts=30153, and repeated
+runs complete reproducibly. The fault phase is at the machine's memory-bandwidth floor
+(~16 GiB/s): every graph re-reads the whole 28 GB working set from the page cache, and
+on the iGPU the pager reads it straight into the window in one pass. When the operator's
+window covers the model, the whole model faults in once and re-faults drop to zero (28 G
+window: faults=7683, 12.8 t/s vs 2.3 t/s at the 3 GiB window).
+
+**MLX backend** (in progress): Added MLX support as a compute backend for llama.vm.
+The ggml-mlx backend (`llama.cpp/ggml/src/ggml-mlx/`) implements the ggml backend API
+using the MLX C++ API for Apple Silicon GPUs. The backend supports core LLM operations:
+MUL_MAT, SOFT_MAX, ADD, MUL, DIV, RMS_NORM, SIN, COS, LOG, and unary operations
+(SILU, EXP, TANH, RELU, GELU, SIGMOID). The backend is registered with ggml's
+backend registry and can be selected via `LLAMA_VM_GPU=mlx`. The pager's VRAM tier
+now supports MLX as a backend option, enabling demand-paged model execution on
+Apple Silicon with MLX as the compute backend. See MLX_BACKEND.md and NEXT_STEPS.md
+for details.
 
 ## Debugging notes
 - **A "stalled" llama-cli is usually the stdin-EOF prompt loop, not the GPU.** After

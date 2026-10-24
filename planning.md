@@ -37,7 +37,7 @@
 - Plugin ready for initial release and user feedback
 
 ## 3. Future Enhancements
-- Add MLX support as a low-priority item
+- Add MLX support (in progress - see NEXT_STEPS.md)
 - Explore additional caching strategies beyond LRU
 - Investigate opportunities for further performance optimizations
 - Gather user feedback and iterate on the design based on real-world usage
