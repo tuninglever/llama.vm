@@ -85,6 +85,51 @@ int main() {
     VM_CHECK(vm_check_pattern(before.data(), 200 * 1024 - 4096, 4096, 3));
     VM_CHECK(vm_check_pattern(after.data(), 200 * 1024 + patch.size(), 4096, 3));
 
+    // the patched pages are now in both tiers: the new bytes in RAM, and (because
+    // write() keeps co-resident copies consistent) the VRAM copies from the gather
+    // above. the gather fast path returns the tier-resident block as-is, so the
+    // patch must already be visible there
+    {
+        void * v3 = pg.tensor_data("w", tier::vram);
+        VM_CHECK(v3 == v); // fast path: same contiguous VRAM block
+        const auto * d = static_cast<const uint8_t *>(v3);
+        for (size_t i = 0; i < patch.size(); ++i) {
+            VM_CHECK(d[200 * 1024 + i] == 0xAB);
+        }
+        VM_CHECK(vm_check_pattern(d, 0, 200 * 1024, 3));
+        VM_CHECK(vm_check_pattern(d + 200 * 1024 + patch.size(), 200 * 1024 + patch.size(),
+                                  SIZE - 200 * 1024 - patch.size(), 3));
+    }
+
+    // crash-recovery: the pager "dies" here. pages swapped out during the write
+    // above survive in the swap file; the pages still in the RAM tier are gone.
+    // a restarted pager (same swap file) must serve the swapped-out pages and
+    // report the lost ones as missing
+    {
+        pager pg2(cfg);
+        pg2.attach_captured_region("w", SIZE);
+
+        // pages 0..7 were swapped out during the first write: readable from swap
+        std::vector<uint8_t> recovered(128 * 1024);
+        pg2.read(0, recovered.data(), recovered.size());
+        VM_CHECK(vm_check_pattern(recovered.data(), 0, recovered.size(), 3));
+
+        // the tail was in the RAM tier at "crash" time: its data is gone
+        VM_EXPECT_THROW(pg2.read(SIZE - 32 * 1024, std::vector<char>(32 * 1024).data(), 32 * 1024));
+
+        // the loader rewrites what it has (here: the lost tail), after which the
+        // whole tensor must be servable again — swapped pages from the file, the
+        // rest from the rewrite
+        std::vector<uint8_t> tail(128 * 1024);
+        for (size_t i = 0; i < tail.size(); ++i) {
+            tail[i] = vm_pat_byte(SIZE - tail.size() + i, 3);
+        }
+        pg2.write(SIZE - tail.size(), tail.data(), tail.size());
+        void * vr = pg2.tensor_data("w", tier::vram);
+        VM_CHECK(vr != nullptr);
+        VM_CHECK(vm_check_pattern(vr, 0, SIZE, 3));
+    }
+
     const stats st = pg.get_stats();
     std::printf("  captured pager stats: resolve=%llu faults=%llu tier_copy=%llu "
                 "evicts=%llu swap_in=%llu swap_out=%llu\n",

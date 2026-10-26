@@ -158,6 +158,16 @@ namespace llama_vm {
         }
     }
 
+    bool pager::impl::data_exists(size_t page_id) const {
+        const page & pg = pages[page_id];
+        if (pg.written || resident(page_id, tier::ram) || resident(page_id, tier::vram)) {
+            return true;
+        }
+        // the recovered bitmap is only trustworthy once it is known to describe this
+        // exact page table (swap_ensure_ready settles it lazily)
+        return swap_fd >= 0 && swap_reused && swap_file_pages == pages.size() && swap_bit(page_id);
+    }
+
     static uint8_t lru_flag(tier t) {
         return t == tier::ram ? 1 : 2;
     }
@@ -956,7 +966,7 @@ namespace llama_vm {
         const region & r = p->regions[p->page_region[ti->page_begin]];
         if (r.is_captured) {
             for (size_t pid = ti->page_begin; pid < ti->page_end; ++pid) {
-                require(p->pages[pid].written,
+                require(p->data_exists(pid),
                         "tensor_data of a captured tensor before it was written in");
             }
         }
@@ -981,7 +991,7 @@ namespace llama_vm {
         const region & r = p->regions[p->page_region[ti->page_begin]];
         if (r.is_captured) {
             for (size_t pid = ti->page_begin; pid < ti->page_end; ++pid) {
-                require(p->pages[pid].written,
+                require(p->data_exists(pid),
                         "tensor_data_range of a captured tensor before it was written in");
             }
         }
@@ -1022,7 +1032,7 @@ namespace llama_vm {
                 p->lru_touch(tier::vram, pid);
             } else {
                 const region & r = p->regions[p->page_region[pid]];
-                if (r.is_captured && !p->pages[pid].written) {
+                if (r.is_captured && !p->data_exists(pid)) {
                     throw std::runtime_error("read of a captured page before its data was "
                                              "written in (write() the region first)");
                 }
@@ -1063,6 +1073,19 @@ namespace llama_vm {
                 std::memcpy(p->ram_base + pg.ram_off + in_off, in + done, n);
             } else {
                 vram_copy_in(p->vram, pg.vram_off + in_off, n, in + done);
+            }
+            // dirty is per page, not per tier: a co-resident copy in the other tier
+            // would go stale and be served with old bytes (the gather fast path
+            // returns tier-resident data without re-checking, and a stale last copy
+            // would be swapped out as if it were the newest), so keep it consistent
+            const tier o = t == tier::ram ? tier::vram : tier::ram;
+            if (p->resident(pid, o)) {
+                if (t == tier::ram) {
+                    vram_copy_in(p->vram, p->pages[pid].vram_off + in_off, n,
+                                 p->ram_base + pg.ram_off + in_off);
+                } else {
+                    std::memcpy(p->ram_base + pg.ram_off + in_off, in + done, n);
+                }
             }
             p->lru_touch(t, pid);
             pg.dirty   = true;

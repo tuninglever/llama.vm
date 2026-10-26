@@ -181,6 +181,10 @@ namespace llama_vm {
         bool resident(size_t page_id, tier t) const;
         size_t slice_off(size_t page_id, tier t) const;
         void set_resident(size_t page_id, tier t, size_t off);
+        // the page's data exists somewhere: written in this session, resident in a
+        // tier, or (after a restart, when the in-memory written flag is gone) held in
+        // the swap file per the validity bitmap the constructor recovered
+        bool data_exists(size_t page_id) const;
 
         // gather pages [a, b) of tier t into one contiguous arena block; returns the
         // tier offset of the block's first byte (page a's data). every covered page
