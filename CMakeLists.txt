@@ -52,6 +52,9 @@ target_link_libraries(llama_vm
         ${LLAMA_VM_GGML}
     PRIVATE
         Threads::Threads)
+if (CMAKE_SYSTEM_NAME STREQUAL "Darwin")
+    target_link_options(llama_vm PRIVATE "-Wl,-undefined,dynamic_lookup")
+endif ()
 
 # ------------------------------ CLI tool --------------------------------
 

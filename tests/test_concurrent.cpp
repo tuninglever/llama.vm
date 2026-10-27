@@ -113,7 +113,7 @@ int main() {
     for (int r = 0; r < NREADERS; ++r) {
         readers.emplace_back([&, r] {
             try {
-                char buf[PAGE];
+                std::vector<char> buf(PAGE);
                 for (int it = 0; it < ITERS; ++it) {
                     for (int k = 0; k < 4; ++k) {
                         const std::string name = std::string("t") + static_cast<char>('0' + k);
@@ -122,11 +122,11 @@ int main() {
                         shared.tensor_data(name, tier::ram);
 
                         // safe, locked verification of both pages of the tensor
-                        if (!shared.read(k * 2 * PAGE, buf, PAGE) || !check_page(buf, 2 * k)) {
+                        if (!shared.read(k * 2 * PAGE, buf.data(), PAGE) || !check_page(buf.data(), 2 * k)) {
                             errs.record("reader " + std::to_string(r) + ": page " + std::to_string(2 * k) + " invalid");
                             return;
                         }
-                        if (!shared.read(k * 2 * PAGE + PAGE, buf, PAGE) || !check_page(buf, 2 * k + 1)) {
+                        if (!shared.read(k * 2 * PAGE + PAGE, buf.data(), PAGE) || !check_page(buf.data(), 2 * k + 1)) {
                             errs.record("reader " + std::to_string(r) + ": page " + std::to_string(2 * k + 1) + " invalid");
                             return;
                         }
@@ -142,13 +142,12 @@ int main() {
 
     std::thread writer([&] {
         try {
-            char buf[PAGE];
-            std::memset(buf, WRITER_BYTE, PAGE);
+            std::vector<char> buf(PAGE, WRITER_BYTE);
             for (int it = 0; it < ITERS; ++it) {
                 // dirty both contested pages, then fault a third so the cache
                 // (2 pages) must evict a dirty page -> swap write-back + re-fault
-                shared.write(0, buf, PAGE);
-                shared.write(4 * PAGE, buf, PAGE);
+                shared.write(0, buf.data(), PAGE);
+                shared.write(4 * PAGE, buf.data(), PAGE);
                 shared.resolve_page(2, tier::ram);
                 shared.resolve_page(6, tier::ram);
             }
@@ -174,10 +173,10 @@ int main() {
     // quiescent final verification: every page must be uniformly one of its
     // allowed bytes (file byte, or the writer's 0xEE for the contested pages)
     {
-        char buf[PAGE];
+        std::vector<char> buf(PAGE);
         for (int p = 0; p < 8; ++p) {
-            shared.read(p * PAGE, buf, PAGE);
-            if (!check_page(buf, p)) {
+            shared.read(p * PAGE, buf.data(), PAGE);
+            if (!check_page(buf.data(), p)) {
                 std::fprintf(stderr, "FAIL concurrent: final page %d invalid\n", p);
                 return 1;
             }

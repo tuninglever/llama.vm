@@ -238,7 +238,11 @@ namespace llama_vm {
     }
 
     void pager::impl::swap_sync() {
+#ifdef __APPLE__
+        if (fsync(swap_fd) != 0) {
+#else
         if (fdatasync(swap_fd) != 0) {
+#endif
             throw std::runtime_error(std::string("failed to sync swap file: ") + std::strerror(errno));
         }
     }

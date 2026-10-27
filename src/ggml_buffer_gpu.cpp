@@ -580,9 +580,23 @@ namespace {
             enum ggml_status err = GGML_STATUS_SUCCESS;
             double compute_ms = 0.0;
             if (!((j - i) == 1 && is_noop(cgraph->nodes[i]))) {
-                struct ggml_cgraph view = ggml_graph_view(cgraph, i, j);
+                // Clear COMPUTE flag on nodes outside this batch
+                std::vector<struct ggml_tensor *> cleared;
+                for (int k = 0; k < cgraph->n_nodes; ++k) {
+                    if (k < i || k >= j) {
+                        if (cgraph->nodes[k]->flags & GGML_TENSOR_FLAG_COMPUTE) {
+                            cleared.push_back(cgraph->nodes[k]);
+                            cgraph->nodes[k]->flags &= ~GGML_TENSOR_FLAG_COMPUTE;
+                        }
+                    }
+                }
+                fprintf(stderr, "DEBUG: computing batch on inner backend (flag-filtered)\n");
                 const clock::time_point t_comp0 = clock::now();
-                err = ggml_backend_graph_compute_async(w->inner, &view);
+                err = ggml_backend_graph_compute_async(w->inner, cgraph);
+                // Restore COMPUTE flag
+                for (struct ggml_tensor * t : cleared) {
+                    t->flags |= GGML_TENSOR_FLAG_COMPUTE;
+                }
                 if (err == GGML_STATUS_SUCCESS) {
                     // while this batch computes (and as the next batch's faults free
                     // window space), stage the next batch's weights: its tensors follow
