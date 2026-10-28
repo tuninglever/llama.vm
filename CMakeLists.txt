@@ -20,7 +20,8 @@ add_library(llama_vm SHARED
     src/vram.cpp
     src/gguf.cpp
     src/ggml_buffer.cpp
-    src/ggml_buffer_gpu.cpp)
+    src/ggml_buffer_gpu.cpp
+    src/forthllm.cpp)
 target_include_directories(llama_vm
     PUBLIC
         ${CMAKE_CURRENT_SOURCE_DIR}/include
@@ -74,7 +75,8 @@ set(LLAMA_VM_TESTS
     test_gguf
     test_vram
     test_captured
-    test_gpu_buffer)
+    test_gpu_buffer
+    test_forthllm)
 
 # the build tree must shadow any installed libllama_vm.so (an old copy in
 # /usr/local/lib would otherwise win via LD_LIBRARY_PATH, which outranks the
