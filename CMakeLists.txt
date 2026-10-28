@@ -21,7 +21,11 @@ add_library(llama_vm SHARED
     src/gguf.cpp
     src/ggml_buffer.cpp
     src/ggml_buffer_gpu.cpp
-    src/forthllm.cpp)
+    src/forthllm.cpp
+    src/jl_projector.cpp
+    src/bwt.cpp
+    src/fm_index.cpp
+    src/squeezer.cpp)
 target_include_directories(llama_vm
     PUBLIC
         ${CMAKE_CURRENT_SOURCE_DIR}/include
@@ -76,7 +80,8 @@ set(LLAMA_VM_TESTS
     test_vram
     test_captured
     test_gpu_buffer
-    test_forthllm)
+    test_forthllm
+    test_squeezer)
 
 # the build tree must shadow any installed libllama_vm.so (an old copy in
 # /usr/local/lib would otherwise win via LD_LIBRARY_PATH, which outranks the
