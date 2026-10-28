@@ -106,6 +106,130 @@ This approach aligns with several active research directions:
 
 The trade-off is between memory/latency efficiency and expressiveness. For many practical tasks (conversation, code completion, summarization), stack-like processing may be sufficient.
 
+## Examples: Running Large LLMs with llama-server
+
+### Example 1: Basic ForthLLM Usage
+
+```bash
+# Start llama-server with ForthLLM context management
+llama-server \
+    -m /path/to/large-model.gguf \
+    --device LLAMA_VM_GPU \
+    -ot '.*=LLAMA_VM_GPU' \
+    -ngl 99 \
+    --load-mode none \
+    --port 8123 \
+    --llama-vm-ram 4G \
+    --llama-vm-vram 8G \
+    --llama-vm-swap /tmp/llama-vm-swap \
+    --forthllm-chunk-size 256 \
+    --forthllm-summary-method attention \
+    --forthllm-max-stack-depth 32
+```
+
+### Example 2: Running a Model Larger Than Available Memory
+
+```bash
+# 70B parameter model on a machine with 32GB RAM + 16GB VRAM
+# Standard approach: OOM
+# ForthLLM approach: Demand-paged weights + compressed context stack
+
+llama-server \
+    -m /path/to/70b-model.gguf \
+    --device LLAMA_VM_GPU \
+    -ot '.*=LLAMA_VM_GPU' \
+    -ngl 99 \
+    --load-mode none \
+    --port 8123 \
+    --llama-vm-ram 16G \
+    --llama-vm-vram 8G \
+    --llama-vm-swap /path/to/fast-ssd/swap \
+    --llama-vm-swap-size 32G \
+    --forthllm-chunk-size 128 \
+    --forthllm-summary-dim 256 \
+    --forthllm-eviction lru
+```
+
+### Example 3: Long-Context Processing
+
+```bash
+# Process a 100K token document with efficient context management
+# Standard approach: KV cache grows to ~40GB
+# ForthLLM approach: Fixed-size context stack (~1GB)
+
+llama-server \
+    -m /path/to/13b-model.gguf \
+    --device LLAMA_VM_GPU \
+    -ot '.*=LLAMA_VM_GPU' \
+    -ngl 99 \
+    --load-mode none \
+    --port 8123 \
+    --llama-vm-ram 8G \
+    --llama-vm-vram 4G \
+    --forthllm-chunk-size 512 \
+    --forthllm-summary-method attention \
+    --forthllm-max-stack-depth 64 \
+    --forthllm-squeezer jl-bwt \
+    --forthllm-jl-dim 128
+```
+
+### Example 4: Edge Device Deployment
+
+```bash
+# Run a 7B model on a Raspberry Pi 5 (8GB RAM, no GPU)
+# Using CPU-only with aggressive context compression
+
+llama-server \
+    -m /path/to/7b-model-q4.gguf \
+    --port 8123 \
+    --llama-vm-ram 4G \
+    --llama-vm-swap /tmp/swap \
+    --forthllm-chunk-size 64 \
+    --forthllm-summary-dim 64 \
+    --forthllm-eviction fixed-window \
+    --forthllm-squeezer jl-bwt
+```
+
+### Example 5: Interactive Chat with Context Management
+
+```bash
+# Multi-turn conversation with automatic context compression
+# Old turns are summarized and compressed as the conversation grows
+
+llama-server \
+    -m /path/to/13b-model.gguf \
+    --device LLAMA_VM_GPU \
+    -ot '.*=LLAMA_VM_GPU' \
+    -ngl 99 \
+    --load-mode none \
+    --port 8123 \
+    --llama-vm-ram 8G \
+    --llama-vm-vram 8G \
+    --forthllm-chunk-size 256 \
+    --forthllm-summary-method attention \
+    --forthllm-eviction lru \
+    --forthllm-max-stack-depth 16
+```
+
+### Performance Comparison
+
+| Scenario | Standard Approach | ForthLLM Approach |
+|----------|------------------|-------------------|
+| 70B model on 32GB RAM | OOM | Runs with paging |
+| 100K token context | ~40GB KV cache | ~1GB context stack |
+| Long conversation | Grows unbounded | Fixed-size stack |
+| Edge deployment | Limited to small models | Larger models possible |
+
+### Configuration Options
+
+- `--forthllm-chunk-size`: Number of tokens per chunk (default: 128)
+- `--forthllm-summary-method`: Summary method (attention, mean, last)
+- `--forthllm-max-stack-depth`: Maximum number of summaries to keep
+- `--forthllm-summary-dim`: Dimension of summary embeddings
+- `--forthllm-eviction`: Eviction policy (lru, lfu, fixed-window)
+- `--forthllm-squeezer`: Compression method (none, jl-bwt)
+- `--forthllm-jl-dim`: JL projection output dimension
+
 ## Future Work
 
 - Explore hybrid approaches (attention for recent tokens, stack for older)
