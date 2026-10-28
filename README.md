@@ -156,6 +156,51 @@ whose unique weight tensors can be resident in the window at once — faults tho
 weights in, re-points `tensor->data` at the window, and computes the batch as one
 real graph on the inner backend.
 
+### Using the MLX backend (Apple Silicon)
+
+To use the MLX backend as the inner compute backend, you need to build llama.cpp
+with the MLX backend enabled. The MLX backend is not included in the upstream
+llama.cpp build by default, so you need to apply a patch and rebuild.
+
+**Step 1: Apply the MLX patch to llama.cpp**
+
+```sh
+cd /path/to/llama.cpp
+git apply /path/to/llama.vm/patches/llama-cpp-mlx-patch.patch
+```
+
+**Step 2: Build llama.cpp with MLX enabled**
+
+```sh
+# Install MLX via Homebrew (if not already installed)
+brew install mlx
+
+cmake -S . -B build-mlx \
+  -DGGML_MLX=ON \
+  -DCMAKE_BUILD_TYPE=Release \
+  -DCMAKE_PREFIX_PATH=/opt/homebrew
+
+cmake --build build-mlx --target ggml-mlx -j
+```
+
+This builds `libggml-mlx.dylib` in `build-mlx/bin/`.
+
+**Step 3: Configure llama.vm to use MLX**
+
+```sh
+export LD_LIBRARY_PATH=$PWD/build:/path/to/llama.cpp/build-mlx/bin:/opt/homebrew/lib
+export GGML_BACKEND_PATH=$PWD/build/libggml-llamavm-gpu.so
+export LLAMA_VM_GPU=mlx
+export LLAMA_VM_VRAM=3G
+export LLAMA_VM_GGUF=/path/to/model.gguf
+
+llama-server -m /path/to/model.gguf --device LLAMA_VM_GPU -ot '.*=LLAMA_VM_GPU' \
+             -ngl 99 --load-mode none --port 8123
+```
+
+**Note:** The MLX backend requires Apple Silicon (M-series) hardware and the MLX
+library. The MLX library is available via Homebrew (`brew install mlx`).
+
 ## License
 
 MIT — see [LICENSE](LICENSE).
