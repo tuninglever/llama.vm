@@ -17,7 +17,11 @@ The MLX backend (`llama.cpp/ggml/src/ggml-mlx/`) implements the ggml backend API
 
 2. Build llama.cpp with MLX support:
    ```bash
-   cmake -S llama.cpp -B llama.cpp/build -DGGML_MLX=ON -DCMAKE_BUILD_TYPE=Release
+   cmake -S llama.cpp -B llama.cpp/build \
+	   -DGGML_MLX=ON -DCMAKE_BUILD_TYPE=Release \
+	   -DCMAKE_PREFIX_PATH=/opt/homebrew/opt/libomp \
+	   -DOpenMP_CXX_FLAGS="-Xpreprocessor -fopenmp" \
+	   -DOpenMP_CXX_LIBRARIES="/opt/homebrew/opt/libomp/lib/libomp.dylib"
    cmake --build llama.cpp/build --target ggml-mlx -j
    ```
 
