@@ -156,6 +156,11 @@ whose unique weight tensors can be resident in the window at once — faults tho
 weights in, re-points `tensor->data` at the window, and computes the batch as one
 real graph on the inner backend.
 
+### Using the MLX backend (Apple Silicon)
+
+To use the MLX backend as the inner compute backend, set `LLAMA_VM_GPU=mlx`.
+See [MLX_BACKEND.md](MLX_BACKEND.md) for build instructions and prerequisites.
+
 ## License
 
 MIT — see [LICENSE](LICENSE).

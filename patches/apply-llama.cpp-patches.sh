@@ -37,7 +37,6 @@ apply_patch() {
 }
 
 apply_patch "${SCRIPT_DIR}/ggml-type66-kimi-q1-0-stub.patch"
-apply_patch "${SCRIPT_DIR}/ggml-backend-moe-ids-host-buffer.patch"
 
 echo "llama.cpp patches applied. Rebuild the ggml libs:"
 echo "  cmake --build ${LLAMA_CPP_DIR}/build --target ggml-base ggml -j"

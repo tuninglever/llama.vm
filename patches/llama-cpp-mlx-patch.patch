@@ -1,0 +1,25 @@
+diff --git a/ggml/CMakeLists.txt b/ggml/CMakeLists.txt
+index 35252a83a..d81b49a7d 100644
+--- a/ggml/CMakeLists.txt
++++ b/ggml/CMakeLists.txt
+@@ -240,6 +240,8 @@ option(GGML_METAL                           "ggml: use Metal"
+ option(GGML_METAL_NDEBUG                    "ggml: disable Metal debugging"                   OFF)
+ option(GGML_METAL_SHADER_DEBUG              "ggml: compile Metal with -fno-fast-math"         OFF)
+ option(GGML_METAL_EMBED_LIBRARY             "ggml: embed Metal library"                       ${GGML_METAL})
++
++option(GGML_MLX                             "ggml: use MLX"                                   OFF)
+ set   (GGML_METAL_MACOSX_VERSION_MIN "" CACHE STRING
+                                             "ggml: metal minimum macOS version")
+ set   (GGML_METAL_STD "" CACHE STRING       "ggml: metal standard version (-std flag)")
+diff --git a/ggml/src/CMakeLists.txt b/ggml/src/CMakeLists.txt
+index fe001a042..b6dd7dae6 100644
+--- a/ggml/src/CMakeLists.txt
++++ b/ggml/src/CMakeLists.txt
+@@ -602,6 +602,7 @@ ggml_add_backend(CUDA)
+ ggml_add_backend(ET)
+ ggml_add_backend(HIP)
+ ggml_add_backend(METAL)
++ggml_add_backend(MLX)
+ ggml_add_backend(MUSA)
+ ggml_add_backend(RPC)
+ ggml_add_backend(VirtGPU)
