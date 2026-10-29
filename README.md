@@ -106,6 +106,10 @@ build/llama-vm demo
 `--backend cpu` runs the VRAM tier on a host buffer (useful without a GPU).
 Size arguments accept `K`/`M`/`G` suffixes.
 
+## Building
+
+See [BUILD.md](BUILD.md) for platform-specific build instructions for ROCm, CUDA, and MLX.
+
 ## Running a model larger than VRAM through llama.cpp
 
 The `LLAMA_VM_GPU` buffer + wrapper backend demand-page weights into a
