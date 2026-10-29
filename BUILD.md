@@ -105,6 +105,10 @@ brew install mlx
 
 ### Apply the MLX patch to llama.cpp
 
+The MLX backend source files must be in `ggml/src/ggml-mlx/` in your llama.cpp
+repository. If you don't have them, clone a fork that includes the MLX backend
+or create the directory and add the source files.
+
 ```bash
 cd /path/to/llama.cpp
 git apply /path/to/llama.vm/patches/llama-cpp-mlx-patch.patch
@@ -117,7 +121,9 @@ cd /path/to/llama.cpp
 cmake -S . -B build-mlx \
   -DGGML_MLX=ON \
   -DCMAKE_BUILD_TYPE=Release \
-  -DCMAKE_PREFIX_PATH=/opt/homebrew
+  -DCMAKE_PREFIX_PATH=/opt/homebrew:/opt/homebrew/opt/libomp \
+  -DOpenMP_CXX_FLAGS="-Xpreprocessor -fopenmp" \
+  -DOpenMP_CXX_LIBRARIES="/opt/homebrew/opt/libomp/lib/libomp.dylib"
 cmake --build build-mlx --target ggml -j
 ```
 
