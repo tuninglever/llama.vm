@@ -22,7 +22,7 @@ The MLX backend (`llama.cpp/ggml/src/ggml-mlx/`) implements the ggml backend API
 	   -DCMAKE_PREFIX_PATH=/opt/homebrew/opt/libomp \
 	   -DOpenMP_CXX_FLAGS="-Xpreprocessor -fopenmp" \
 	   -DOpenMP_CXX_LIBRARIES="/opt/homebrew/opt/libomp/lib/libomp.dylib"
-   cmake --build llama.cpp/build --target ggml-mlx -j
+   cmake --build llama.cpp/build --target ggml -j
    ```
 
 ### Building llama.vm
