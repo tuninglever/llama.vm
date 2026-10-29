@@ -15,6 +15,25 @@ if (NOT LlamaVM_LLAMA_CPP_DIR)
     message(FATAL_ERROR "set -DLlamaVM_LLAMA_CPP_DIR=/path/to/llama.cpp")
 endif ()
 
+# build dir inside the llama.cpp tree holding the prebuilt ggml libraries.
+# llama.cpp is built per platform (see llama.vm's BUILD.md): build-hip (ROCm),
+# build-cuda (CUDA), build-mlx (MLX), or a plain build/. Auto-detect the first
+# one that contains libggml-base.so; override with -DLlamaVM_LLAMA_BUILD_DIR=.
+set(LlamaVM_LLAMA_BUILD_DIR "" CACHE PATH "build dir in the llama.cpp tree with the prebuilt ggml libraries (auto-detected)")
+if (NOT LlamaVM_LLAMA_BUILD_DIR)
+    foreach (candidate build-hip build-cuda build-mlx build)
+        if (EXISTS "${LlamaVM_LLAMA_CPP_DIR}/${candidate}/bin/libggml-base.so")
+            set(LlamaVM_LLAMA_BUILD_DIR "${candidate}")
+            break ()
+        endif ()
+    endforeach ()
+endif ()
+if (NOT LlamaVM_LLAMA_BUILD_DIR)
+    message(FATAL_ERROR "no prebuilt ggml libraries found under ${LlamaVM_LLAMA_CPP_DIR} (looked in build-hip, build-cuda, build-mlx, build); set -DLlamaVM_LLAMA_BUILD_DIR=...")
+endif ()
+set(LlamaVM_LLAMA_BUILD_BIN "${LlamaVM_LLAMA_CPP_DIR}/${LlamaVM_LLAMA_BUILD_DIR}/bin")
+message(STATUS "llama.vm: using ggml libraries from ${LlamaVM_LLAMA_BUILD_BIN}")
+
 add_library(llama_vm SHARED
     src/pager.cpp
     src/vram.cpp
@@ -36,17 +55,17 @@ target_include_directories(llama_vm
 
 find_library(LLAMA_VM_GGML_BASE
     NAMES ggml-base
-    PATHS ${LlamaVM_LLAMA_CPP_DIR}/build/bin
+    PATHS ${LlamaVM_LLAMA_BUILD_BIN}
     NO_DEFAULT_PATH)
 find_library(LLAMA_VM_GGML
     NAMES ggml
-    PATHS ${LlamaVM_LLAMA_CPP_DIR}/build/bin
+    PATHS ${LlamaVM_LLAMA_BUILD_BIN}
     NO_DEFAULT_PATH)
 if (NOT LLAMA_VM_GGML_BASE)
-    message(FATAL_ERROR "libggml-base.so not found under ${LlamaVM_LLAMA_CPP_DIR}/build/bin")
+    message(FATAL_ERROR "libggml-base.so not found under ${LlamaVM_LLAMA_BUILD_BIN}")
 endif ()
 if (NOT LLAMA_VM_GGML)
-    message(FATAL_ERROR "libggml.so not found under ${LlamaVM_LLAMA_CPP_DIR}/build/bin")
+    message(FATAL_ERROR "libggml.so not found under ${LlamaVM_LLAMA_BUILD_BIN}")
 endif ()
 message(STATUS "llama.vm: using ${LLAMA_VM_GGML_BASE} and ${LLAMA_VM_GGML}")
 
@@ -100,7 +119,7 @@ endforeach ()
 # (needs the core libllama; auto-skips at run time if no model is available)
 find_library(LLAMA_VM_LLAMA
     NAMES llama
-    PATHS ${LlamaVM_LLAMA_CPP_DIR}/build/bin
+    PATHS ${LlamaVM_LLAMA_BUILD_BIN}
     NO_DEFAULT_PATH)
 if (LLAMA_VM_LLAMA)
     add_executable(test_llama_integration tests/test_llama_integration.cpp)
