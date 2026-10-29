@@ -590,7 +590,7 @@ namespace {
                         }
                     }
                 }
-                fprintf(stderr, "DEBUG: computing batch on inner backend (flag-filtered)\n");
+                fputc('.', stderr); // one dot per batch: progress without the per-batch line
                 const clock::time_point t_comp0 = clock::now();
                 err = ggml_backend_graph_compute_async(w->inner, cgraph);
                 // Restore COMPUTE flag
