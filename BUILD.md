@@ -103,16 +103,10 @@ Install MLX via Homebrew:
 brew install mlx
 ```
 
-### Apply the MLX patch to llama.cpp
+### MLX Backend
 
-The MLX backend source files must be in `ggml/src/ggml-mlx/` in your llama.cpp
-repository. If you don't have them, clone a fork that includes the MLX backend
-or create the directory and add the source files.
-
-```bash
-cd /path/to/llama.cpp
-git apply /path/to/llama.vm/patches/llama-cpp-mlx-patch.patch
-```
+The MLX backend is included in the llama.cpp repository at `ggml/src/ggml-mlx/`.
+No patch is needed.
 
 ### Build llama.cpp with MLX support
 
