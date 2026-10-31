@@ -1,148 +1,203 @@
 #include "forthllm/forthllm.h"
+
 #include <algorithm>
 #include <cmath>
+#include <cstring>
 #include <stdexcept>
-#include <iostream>
 
 namespace forthllm {
 
-    // Simple attention-based importance scoring
-    // In a real implementation, this would use actual attention weights
-    static float compute_attention_score(const std::vector<int> & tokens, size_t token_idx) {
-        // Placeholder: give recent tokens higher scores
-        float recency = 1.0f / (1.0f + (tokens.size() - token_idx - 1) * 0.1f);
-        return recency;
+    void config::validate() const {
+        if (chunk_size == 0) {
+            throw std::runtime_error("forthllm: chunk_size must be > 0");
+        }
+        if (summary_dim == 0) {
+            throw std::runtime_error("forthllm: summary_dim must be > 0");
+        }
+        if (summary_dim > chunk_size) {
+            throw std::runtime_error("forthllm: summary_dim (" + std::to_string(summary_dim) +
+                                     ") must be <= chunk_size (" + std::to_string(chunk_size) + ")");
+        }
+        if (max_stack_depth == 0) {
+            throw std::runtime_error("forthllm: max_stack_depth must be > 0");
+        }
+        squeezer_from_str(squeezer); // throws on unknown
+        if (squeezer == "jl-bwt" && jl_dim == 0) {
+            throw std::runtime_error("forthllm: jl_dim must be > 0 when the squeezer is jl-bwt");
+        }
+        // summary and eviction are enums, so they are always valid
     }
 
-    // Simple mean pooling for chunk summary
-    static std::vector<float> mean_pool(const std::vector<std::vector<float>> & embeddings, size_t dim) {
-        std::vector<float> result(dim, 0.0f);
-        for (const auto & emb : embeddings) {
-            for (size_t i = 0; i < dim && i < emb.size(); ++i) {
-                result[i] += emb[i];
+    summary_method summary_method_from_str(const std::string & s) {
+        std::string l = s;
+        std::transform(l.begin(), l.end(), l.begin(), ::tolower);
+        if (l == "attention") {
+            return summary_method::attention;
+        }
+        if (l == "mean") {
+            return summary_method::mean;
+        }
+        if (l == "last") {
+            return summary_method::last;
+        }
+        throw std::runtime_error("forthllm: unknown summary method '" + s + "' (use attention|mean|last)");
+    }
+
+    const char * summary_method_name(summary_method m) {
+        switch (m) {
+            case summary_method::attention: return "attention";
+            case summary_method::mean:      return "mean";
+            case summary_method::last:      return "last";
+        }
+        return "unknown";
+    }
+
+    std::string eviction_from_str(const std::string & s) {
+        std::string l = s;
+        std::transform(l.begin(), l.end(), l.begin(), ::tolower);
+        if (l == "lru" || l == "lfu" || l == "fixed-window") {
+            return l;
+        }
+        throw std::runtime_error("forthllm: unknown eviction policy '" + s + "' (use lru|lfu|fixed-window)");
+    }
+
+    std::string squeezer_from_str(const std::string & s) {
+        std::string l = s;
+        std::transform(l.begin(), l.end(), l.begin(), ::tolower);
+        if (l == "none" || l == "jl-bwt") {
+            return l;
+        }
+        throw std::runtime_error("forthllm: unknown squeezer '" + s + "' (use none|jl-bwt)");
+    }
+
+    void summarize(
+            const float * k, size_t n_heads_k, size_t head_dim_k,
+            const float * v, size_t n_heads_v, size_t head_dim_v,
+                   size_t C, size_t S,
+            summary_method method,
+            std::vector<float> & k_out, std::vector<float> & v_out) {
+        if (C == 0 || S == 0) {
+            k_out.clear();
+            v_out.clear();
+            return;
+        }
+        S = std::min(S, C);
+        const size_t kv_dim_k = n_heads_k * head_dim_k;
+        const size_t kv_dim_v = n_heads_v * head_dim_v;
+        k_out.assign(S * kv_dim_k, 0.0f);
+        v_out.assign(S * kv_dim_v, 0.0f);
+
+        if (method == summary_method::last) {
+            for (size_t s = 0; s < S; ++s) {
+                const size_t i = C - S + s;
+                std::memcpy(&k_out[s * kv_dim_k], &k[i * kv_dim_k], kv_dim_k * sizeof(float));
+                std::memcpy(&v_out[s * kv_dim_v], &v[i * kv_dim_v], kv_dim_v * sizeof(float));
             }
-        }
-        for (size_t i = 0; i < dim; ++i) {
-            result[i] /= embeddings.size();
-        }
-        return result;
-    }
-
-    struct context_manager::impl {
-        config cfg;
-        std::vector<chunk_summary> stack;
-        size_t next_chunk_id;
-
-        impl(const config & cfg) : cfg(cfg), next_chunk_id(0) {}
-    };
-
-    context_manager::context_manager(const config & cfg) : p(new impl(cfg)) {}
-    context_manager::~context_manager() = default;
-
-    void context_manager::process_chunk(const std::vector<int> & tokens) {
-        if (tokens.empty()) {
             return;
         }
 
-        // Create a chunk summary
-        chunk_summary summary;
-        summary.chunk_id = p->next_chunk_id++;
-        summary.start_token = 0;  // Will be set by caller
-        summary.end_token = tokens.size();
-        summary.embedding = std::vector<float>(p->cfg.summary_dim, 0.0f);
-        summary.attention_score = 0.0f;
-        summary.evicted = false;
+        // split the chunk into S contiguous sub-chunks (even split; the boundaries are
+        // floor(i*C/S) so every sub-chunk is non-empty); pool each sub-chunk with
+        // per-head weights (head h's K and V rows are pooled with head h's weights)
+        for (size_t s = 0; s < S; ++s) {
+            const size_t i0 = (s * C) / S;
+            const size_t i1 = ((s + 1) * C) / S;
+            const size_t n  = i1 - i0;
 
-        // Compute attention score (simplified)
-        for (size_t i = 0; i < tokens.size(); ++i) {
-            summary.attention_score += compute_attention_score(tokens, i);
-        }
-        summary.attention_score /= tokens.size();
+            // per-head weights from the K rows (last-key similarity within the
+            // sub-chunk: the sub-chunk's last key stands in for the query, so rows
+            // similar to it get the most weight)
+            std::vector<std::vector<float>> W(n_heads_k, std::vector<float>(n, 1.0f / (float) n));
+            if (method == summary_method::attention) {
+                for (size_t h = 0; h < n_heads_k; ++h) {
+                    const float * q = &k[(i1 - 1) * kv_dim_k + h * head_dim_k];
+                    float max_score = -INFINITY;
+                    for (size_t i = 0; i < n; ++i) {
+                        const float * kr = &k[(i0 + i) * kv_dim_k + h * head_dim_k];
+                        float dot = 0.0f;
+                        for (size_t j = 0; j < head_dim_k; ++j) {
+                            dot += kr[j] * q[j];
+                        }
+                        W[h][i] = dot / std::sqrt((float) head_dim_k);
+                        max_score = std::max(max_score, W[h][i]);
+                    }
+                    float sum = 0.0f;
+                    for (size_t i = 0; i < n; ++i) {
+                        W[h][i] = std::exp(W[h][i] - max_score);
+                        sum += W[h][i];
+                    }
+                    for (size_t i = 0; i < n; ++i) {
+                        W[h][i] /= sum;
+                    }
+                }
+            }
 
-        // In a real implementation, we would:
-        // 1. Embed the tokens
-        // 2. Run through transformer layers
-        // 3. Extract attention weights
-        // 4. Create a compressed summary
-
-        // For now, use a simple mean of random values as a placeholder
-        for (size_t i = 0; i < p->cfg.summary_dim; ++i) {
-            summary.embedding[i] = static_cast<float>(std::sin(i + summary.chunk_id)) * 0.1f;
-        }
-
-        push(summary);
-    }
-
-    void context_manager::push(const chunk_summary & summary) {
-        p->stack.push_back(summary);
-
-        // Evict if over max depth
-        if (p->stack.size() > p->cfg.max_stack_depth) {
-            evict();
-        }
-    }
-
-    chunk_summary context_manager::pop() {
-        if (p->stack.empty()) {
-            throw std::runtime_error("pop() on empty stack");
-        }
-        chunk_summary result = p->stack.back();
-        p->stack.pop_back();
-        return result;
-    }
-
-    const chunk_summary & context_manager::peek() const {
-        if (p->stack.empty()) {
-            throw std::runtime_error("peek() on empty stack");
-        }
-        return p->stack.back();
-    }
-
-    size_t context_manager::depth() const {
-        return p->stack.size();
-    }
-
-    void context_manager::evict() {
-        if (p->stack.size() <= p->cfg.max_stack_depth) {
-            return;
-        }
-
-        // LRU eviction: remove oldest entries
-        size_t to_remove = p->stack.size() - p->cfg.max_stack_depth;
-        for (size_t i = 0; i < to_remove; ++i) {
-            p->stack[i].evicted = true;
-        }
-        p->stack.erase(p->stack.begin(), p->stack.begin() + to_remove);
-    }
-
-    std::vector<float> context_manager::combine_context() const {
-        if (p->stack.empty()) {
-            return std::vector<float>(p->cfg.summary_dim, 0.0f);
-        }
-
-        // Collect all embeddings
-        std::vector<std::vector<float>> embeddings;
-        for (const auto & summary : p->stack) {
-            if (!summary.evicted) {
-                embeddings.push_back(summary.embedding);
+            for (size_t h = 0; h < n_heads_k; ++h) {
+                for (size_t j = 0; j < head_dim_k; ++j) {
+                    float ak = 0.0f;
+                    for (size_t i = 0; i < n; ++i) {
+                        ak += W[h][i] * k[(i0 + i) * kv_dim_k + h * head_dim_k + j];
+                    }
+                    k_out[s * kv_dim_k + h * head_dim_k + j] = ak;
+                }
+            }
+            for (size_t h = 0; h < n_heads_v; ++h) {
+                for (size_t j = 0; j < head_dim_v; ++j) {
+                    float av = 0.0f;
+                    for (size_t i = 0; i < n; ++i) {
+                        av += W[h][i] * v[(i0 + i) * kv_dim_v + h * head_dim_v + j];
+                    }
+                    v_out[s * kv_dim_v + h * head_dim_v + j] = av;
+                }
             }
         }
+    }
 
-        if (embeddings.empty()) {
-            return std::vector<float>(p->cfg.summary_dim, 0.0f);
+    stack::stack(const config & cfg) : cfg_(cfg) {}
+
+    void stack::push(const chunk_info & info) {
+        stack_.push_back(info);
+    }
+
+    std::vector<size_t> stack::evict() {
+        std::vector<size_t> to_drop;
+        if (stack_.size() <= cfg_.max_stack_depth) {
+            return to_drop;
         }
-
-        // Mean pool across all summaries
-        return mean_pool(embeddings, p->cfg.summary_dim);
+        if (cfg_.eviction == eviction_policy::fixed_window) {
+            // keep only the most recent max_stack_depth chunks
+            const size_t n_drop = stack_.size() - cfg_.max_stack_depth;
+            for (size_t i = 0; i < n_drop; ++i) {
+                to_drop.push_back(stack_[i].chunk_id);
+            }
+            stack_.erase(stack_.begin(), stack_.begin() + n_drop);
+            return to_drop;
+        }
+        // lru (and lfu, which falls back to lru until per-chunk attention counts are
+        // available): drop the least important, ties broken by oldest
+        while (stack_.size() > cfg_.max_stack_depth) {
+            size_t worst = 0;
+            for (size_t i = 1; i < stack_.size(); ++i) {
+                if (stack_[i].importance < stack_[worst].importance) {
+                    worst = i;
+                }
+            }
+            to_drop.push_back(stack_[worst].chunk_id);
+            stack_.erase(stack_.begin() + worst);
+        }
+        return to_drop;
     }
 
-    void context_manager::reset() {
-        p->stack.clear();
-        p->next_chunk_id = 0;
+    size_t stack::size() const {
+        return stack_.size();
     }
 
-    const config & context_manager::get_config() const {
-        return p->cfg;
+    const chunk_info & stack::at(size_t i) const {
+        return stack_.at(i);
+    }
+
+    void stack::clear() {
+        stack_.clear();
     }
 
 } // namespace forthllm

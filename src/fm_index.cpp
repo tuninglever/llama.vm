@@ -5,8 +5,12 @@
 namespace forthllm {
 
     fm_index::fm_index(const std::string & text) {
-        // Compute the BWT
+        // Compute the BWT. transform() appends a 4-byte row index for invert(); the
+        // FM-index needs the raw BWT, so strip it.
         bwt_ = bwt_transform::transform(text);
+        if (bwt_.size() >= 4) {
+            bwt_.resize(bwt_.size() - 4);
+        }
 
         size_t n = bwt_.size();
 

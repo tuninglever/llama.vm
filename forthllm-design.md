@@ -9,12 +9,13 @@
 > Still **aspirational** in the *Examples* below: the stored-representation options
 > (`--forthllm-max-stack-depth`, `--forthllm-eviction`, `--forthllm-squeezer`,
 > `--forthllm-jl-dim`) parse and validate but are not yet used by the cache path, and
-> MLA models (DeepSeek-V4) are a documented "not supported" compaction path. The
-> library in `include/forthllm/` + `src/forthllm.cpp` in *this repo* is still a
-> placeholder (`process_chunk()` fills "summaries" with
-> `sin(i + chunk_id) * 0.1f`, never touches the model) — Phase 4 replaces it with the
-> real engine. The full assessment and the implementation are in
-> `llama-server-forthllm-investigation.md`.
+> MLA models (DeepSeek-V4) are a documented "not supported" compaction path.
+>
+> **Phase 4a done (2026-10-31):** the library in `include/forthllm/` + `src/forthllm.cpp`
+> in *this repo* is now a faithful port of the tested llama.cpp engine (real
+> `summarize`/`stack`/`squeezer`/`bwt`/`jl_projector`, no ggml) — the old token-level
+> `context_manager` placeholder is gone. The full assessment, the Phase 4 handoff, and
+> the implementation are in `llama-server-forthllm-investigation.md`.
 >
 > Also note: the `--llama-vm-ram/--llama-vm-vram/...` flags shown in the examples are
 > not in the current llama.cpp build either — set the `LLAMA_VM_*` env vars instead

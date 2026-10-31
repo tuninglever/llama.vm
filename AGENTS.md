@@ -72,9 +72,10 @@ tests/                        test_arena, test_pager, test_concurrent, test_ggml
                                  test_gguf, test_vram (ctest)
 tools/llama-vm.cpp            CLI: info / verify / bench / pages / plan / tiered / demo
 include/forthllm/, src/forthllm.cpp, src/squeezer.cpp, src/bwt.cpp, src/fm_index.cpp,
-                                src/jl_projector.cpp   ForthLLM scaffold (PLACEHOLDER —
-                                summaries are sin() values, no model access; the real
-                                engine now lives in llama.cpp, see below)
+                                src/jl_projector.cpp   ForthLLM model-agnostic math
+                                (summarize/stack/squeezer/BWT/JL — a faithful port of
+                                the tested llama.cpp engine, no ggml; the KV-cache
+                                surgery + C API live in llama.cpp, see below)
 design.md, planning.md        original design and roadmap
 forthllm-design.md            ForthLLM design (examples are aspirational — the flag
                                 set is implemented in llama.cpp but the stored-
@@ -430,11 +431,15 @@ Measured on a 28 GB Qwen3.6-27B Q8_0 (model on the page cache):
    incl. hybrid/IMROPE support, and the server's post-prefill, context-limit-stop,
    and pre-context-shift hooks); validated end-to-end on Qwen3.8-27B (2196-token
    prompt → 180 cells, coherent answer). The patch is `patches/llama-cpp-forthllm-kv-compaction.patch`.
-   Remaining (Phase 4): replace this repo's `include/forthllm/` + `src/forthllm.cpp`
-   placeholder scaffold with the real engine (or a thin re-export), wire the
-   stored-representation options (`max_stack_depth`/`eviction`/`squeezer`) into the
-   cache path, and add MLA (DeepSeek-V4) support. See
-   `llama-server-forthllm-investigation.md`.
+   Phase 4a is done: this repo's `include/forthllm/` + `src/forthllm.cpp` (+
+   `squeezer`/`bwt`/`fm_index`/`jl_projector`) scaffold is now a faithful port of the
+   tested llama.cpp engine (real summarize/stack/squeezer/BWT, no more `sin()`
+   summaries or broken BWT invert; `test_forthllm` + `test_squeezer` pass). Remaining
+   (Phase 4b/4c): wire the stored-representation options (`max_stack_depth`/`eviction`/
+   `squeezer`) into the cache path, and add MLA (DeepSeek-V4) support — note DSV4's
+   cache is a raw-SWA + compressed-block + ring-state structure, not a plain MLA
+   cache, so 4c needs its own design pass. See
+   `llama-server-forthllm-investigation.md` (Phase 4 handoff).
 
 Done since the last revision: concurrency stress test (`test_concurrent`), swap
 crash-recovery (`fdatasync` + validity bitmap), host-region support, the ggml buffer
@@ -481,9 +486,10 @@ Qwen3.8-27B (qwen35, hybrid, IMROPE): a 2196-token prompt compacted to 180 cells
 (DeepSeek-V4 — the user's model), `hybrid_iswa`/`hybrid_idx`, speculative slots, and
 the stored-representation options (`max_stack_depth`/`eviction`/`squeezer`, parsed but
 not yet used by the cache path). This repo's `include/forthllm/` + `src/forthllm.cpp`
-(+ `squeezer`, `bwt`, `fm_index`, `jl_projector`) scaffold is still a placeholder
-(`process_chunk()` fills summaries with `sin(i + chunk_id) * 0.1f`, never touches the
-model) — Phase 4 replaces it. (The `--llama-vm-*` flags are likewise absent from the
+(+ `squeezer`, `bwt`, `fm_index`, `jl_projector`) scaffold is now a faithful port of
+the tested llama.cpp engine (real summarize/stack/squeezer/BWT — no more `sin()`
+summaries or broken BWT invert; `test_forthllm` + `test_squeezer` pass) — Phase 4a
+done. (The `--llama-vm-*` flags are likewise absent from the
 current build — budgets go through the `LLAMA_VM_*` env vars.) The full assessment,
 the llama.cpp KV-cache API survey, and the phased implementation are in
 `llama-server-forthllm-investigation.md`.

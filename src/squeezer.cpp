@@ -1,97 +1,92 @@
 #include "forthllm/squeezer.h"
+
+#include <algorithm>
 #include <cmath>
-#include <sstream>
+#include <cstring>
+#include <stdexcept>
 
 namespace forthllm {
 
-    squeezer::squeezer(size_t input_dim, size_t output_dim)
-        : projector_(input_dim, output_dim), index_("") {}
+    squeezer::squeezer(size_t input_dim, size_t output_dim, uint32_t seed)
+        : projector_(input_dim, output_dim, seed), index_("") {}
 
-    std::string squeezer::squeeze(const std::vector<float> & embedding) {
+    std::string squeezer::squeeze(const std::vector<float> & embedding) const {
         // Step 1: JL projection
-        std::vector<float> projected = projector_.project(embedding);
+        const std::vector<float> projected = projector_.project(embedding);
 
-        // Step 2: Quantize to bytes (0-255)
-        std::string quantized;
-        for (float val : projected) {
-            // Normalize to [0, 1] then scale to [0, 255]
-            float normalized = (val + 1.0f) / 2.0f;
-            unsigned char byte = static_cast<unsigned char>(normalized * 255.0f);
-            quantized += static_cast<char>(byte);
+        // Step 2: 8-bit quantization with a per-vector min/max scale (real KV data is
+        // not confined to [-1, 1])
+        float lo = projected.front();
+        float hi = projected.front();
+        for (float x : projected) {
+            lo = std::min(lo, x);
+            hi = std::max(hi, x);
+        }
+        const float scale = (hi > lo) ? 255.0f / (hi - lo) : 0.0f;
+        std::string bytes(projected.size(), '\0');
+        for (size_t i = 0; i < projected.size(); ++i) {
+            bytes[i] = (char) (uint8_t) std::lround((projected[i] - lo) * scale);
         }
 
-        // Step 3: BWT transform
-        std::string transformed = bwt_transform::transform(quantized);
-
-        return transformed;
+        // Step 3: BWT transform, then append the min/max scale for expand()
+        std::string blob = bwt_transform::transform(bytes);
+        blob.append(reinterpret_cast<const char *>(&lo), sizeof(lo));
+        blob.append(reinterpret_cast<const char *>(&hi), sizeof(hi));
+        return blob;
     }
 
-    std::vector<float> squeezer::expand(const std::string & compressed) {
-        // Step 1: Invert BWT
-        std::string quantized = bwt_transform::invert(compressed);
-
-        // Step 2: Dequantize to floats
-        std::vector<float> projected(quantized.size());
-        for (size_t i = 0; i < quantized.size(); ++i) {
-            unsigned char byte = static_cast<unsigned char>(quantized[i]);
-            float normalized = byte / 255.0f;
-            projected[i] = normalized * 2.0f - 1.0f;
+    std::vector<float> squeezer::expand(const std::string & compressed) const {
+        if (compressed.size() < 8) {
+            throw std::runtime_error("forthllm: invalid squeezer blob");
         }
-
-        // Note: We can't perfectly invert the JL projection,
-        // so we return the projected vector as-is.
-        return projected;
+        const size_t n_bwt = compressed.size() - 8;
+        float lo, hi;
+        std::memcpy(&lo, compressed.data() + n_bwt, sizeof(lo));
+        std::memcpy(&hi, compressed.data() + n_bwt + sizeof(hi), sizeof(hi));
+        const std::string bytes = bwt_transform::invert(compressed.substr(0, n_bwt));
+        const float scale = (hi > lo) ? (hi - lo) / 255.0f : 0.0f;
+        std::vector<float> out(bytes.size());
+        for (size_t i = 0; i < bytes.size(); ++i) {
+            out[i] = lo + (float) (uint8_t) bytes[i] * scale;
+        }
+        return out;
     }
 
     void squeezer::index_add(size_t id, const std::string & compressed) {
         indexed_data_.push_back({id, compressed});
 
-        // Rebuild the FM-index with all indexed data
+        // Rebuild the FM-index over the indexed blobs (auxiliary; the core search is
+        // the byte-distance heuristic in search())
         std::string combined;
         for (const auto & [id, data] : indexed_data_) {
             combined += data;
-            combined += "\n";  // Separator
+            combined += "\n"; // Separator
         }
         index_ = fm_index(combined);
     }
 
-    std::vector<size_t> squeezer::search(const std::vector<float> & query, size_t top_k) {
-        // Project the query
-        std::vector<float> projected = projector_.project(query);
-
-        // Quantize to bytes
-        std::string quantized;
-        for (float val : projected) {
-            float normalized = (val + 1.0f) / 2.0f;
-            unsigned char byte = static_cast<unsigned char>(normalized * 255.0f);
-            quantized += static_cast<char>(byte);
-        }
-
-        // Use FM-index to find similar entries
-        // This is a simplified search; in practice, you'd use
-        // approximate nearest neighbor search on the compressed data
+    std::vector<size_t> squeezer::search(const std::vector<float> & query, size_t top_k) const {
+        // Compress the query the same way as the indexed entries, then rank by the
+        // number of differing bytes (a simple heuristic, not a true ANN search)
+        const std::string q = squeeze(query);
         std::vector<size_t> results;
         for (const auto & [id, data] : indexed_data_) {
-            // Compare quantized representations
-            if (data.size() == quantized.size()) {
-                size_t differences = 0;
-                for (size_t i = 0; i < data.size(); ++i) {
-                    if (data[i] != quantized[i]) {
-                        differences++;
-                    }
-                }
-                // Include if sufficiently similar
-                if (differences < quantized.size() / 4) {
-                    results.push_back(id);
+            if (data.size() != q.size()) {
+                continue;
+            }
+            size_t differences = 0;
+            for (size_t i = 0; i < data.size(); ++i) {
+                if (data[i] != q[i]) {
+                    differences++;
                 }
             }
+            if (differences < q.size() / 4) {
+                results.push_back(id);
+            }
         }
-
-        // Return top_k results
         if (results.size() > top_k) {
             results.resize(top_k);
         }
-
         return results;
     }
 

@@ -414,14 +414,106 @@ multimodal prompts, and the stored-representation options (`max_stack_depth` /
 `eviction` / `squeezer`) which validate at parse time but are not yet used by the
 cache path.
 
-### Phase 4 — replace the llama.vm placeholder
+### Phase 4 — handoff (written 2026-10-30, while context is fresh)
 
-Once the engine proves out in llama.cpp, replace `src/forthllm.cpp`'s placeholder math
-with the real engine (or make the llama.vm copy a thin re-export), and update
-`forthllm-design.md` examples to the actually-implemented flag set. Keep the patch in
-`patches/` (repo convention) so it applies to a fresh llama.cpp checkout.
+Phase 4 has three self-contained parts. They are ordered here by context-cost, not by
+priority; the priority call is at the end.
 
-### Open questions
+#### 4a — replace the llama.vm placeholder scaffold — **DONE (2026-10-31)**
+
+Replaced the token-level placeholder (`context_manager::process_chunk` filling `sin()`)
+with a faithful port of the tested llama.cpp engine into `namespace forthllm`: real
+`summarize` (attention/mean/last KV-row pooling), `stack` (lru/lfu/fixed-window
+eviction), `squeezer` (JL → per-vector min/max 8-bit quant → BWT), `bwt_transform`
+(`uint8_t` comparator, exact invert — the bytes≥128 case is now tested), and
+`jl_projector` (deterministic Gaussian). The token-level `context_manager`/`chunk_summary`
+API was removed (it had no real semantics); `fm_index` is kept as a standalone utility
+(it now strips the BWT's 4-byte row index). `test_forthllm` (8 tests) + `test_squeezer`
+(6 tests) pass; full ctest suite green (11/11). Note: `fm_index::locate` positions are a
+pre-existing quirk of the circular BWT (no sentinel) — `count` is correct; the test
+asserts count + position count, not exact positions.
+
+Blast radius (verified): `include/forthllm/{forthllm,squeezer}.h`,
+`src/{forthllm,jl_projector,bwt,fm_index,squeezer}.cpp`,
+`tests/{test_forthllm,test_squeezer}.cpp`, and one block in `CMakeLists.txt`
+(5 sources + 2 tests). Nothing else in the repo touches it.
+
+The scaffold is a **token-level** placeholder: `forthllm::context_manager::process_chunk(
+std::vector<int> tokens)` fills `chunk_summary.embedding` with `sin(i + chunk_id) * 0.1f`
+and never touches a model. Its `bwt_transform::invert` is broken (the summary in
+AGENTS.md). The **real** engine (llama.cpp `include/llama-forthllm.h` + `src/forthllm.cpp`)
+is a **KV-row-level** math library and is self-contained — it depends only on `llama.h`
+(for `llama_pos`) and std headers, **no ggml**:
+- `llama_forthllm_summarize(k, n_heads_k, head_dim_k, v, n_heads_v, head_dim_v, C, S,
+  method, k_out, v_out)` — attention/mean/last pooling of KV rows into S rows.
+- `llama_forthllm_stack` — chunk stack with lru/lfu/fixed-window eviction.
+- `llama_forthllm_squeezer` — JL projection → 8-bit quant → BWT (`squeeze`/`expand`).
+- `llama_forthllm_bwt_transform` / `llama_forthllm_bwt_invert` — exact invert via LF
+  mapping, `uint8_t` comparator (the signed-char bug that corrupted order for bytes ≥ 128
+  is fixed here).
+
+**Decision needed (changes the public API):** the scaffold's `context_manager`
+abstraction has no real semantics and does not map onto the KV-row engine. Recommended:
+port the real math into `namespace forthllm`, replacing the placeholder implementations
+(fixes the BWT invert, removes the `sin()` summaries), and **replace the token-level
+`context_manager` with the KV-row API** (`summarize` + `stack`), updating the two test
+files to test real behavior. `fm_index` is not used by the real engine — keep it as a
+standalone tested utility or drop it (low cost either way). Do **not** copy the scaffold's
+BWT into llama.cpp; the llama.cpp one is the fixed, tested version.
+
+#### 4b — wire `max_stack_depth` / `eviction` / `squeezer` into the cache path (llama.cpp)
+
+These three flags parse (Phase 1) but are not yet used by the compaction path —
+`llama_forthllm_compact` only takes `chunk_size` / `summary_dim` / `summary_method`.
+Wiring them means: (1) the C API / `common_params_forthllm` must carry the full
+`llama_forthllm_config` into `forthllm_compact`; (2) the server hook must maintain a
+`llama_forthllm_stack` per slot (push on compact, `evict()` when over `max_stack_depth`,
+drop the evicted chunks' summary rows from the KV cache); (3) the `squeezer` is for the
+stored/offloaded representation, not the in-cache rows (which stay head-dim) — so it
+attaches to state save/load, not the compaction itself.
+
+#### 4c — MLA / DeepSeek-V4 support (the user's actual model) — **bigger than expected**
+
+The user's `test-forth-deepseek()` model (DeepSeek-V4-Flash) uses `llama_kv_cache_dsv4`.
+**Finding (2026-10-30): this is NOT a standard MLA cache.** `llama_kv_cache_dsv4`
+(`src/llama-kv-cache-dsv4.h`) is a `llama_memory_i` composed of:
+- `kv_raw` — a `llama_kv_cache_iswa` (normal **raw/SWA token** cache; the sliding-window
+  half is what DSV4 raw attention reads; the base half is kept for ISWA bookkeeping only).
+- `kv_csa` / `kv_hca` / `kv_lid` — three **compressed K-only block caches** (plain
+  `llama_kv_cache`). These are *storage only*; DSV4-specific visibility and block planning
+  live in `llama_kv_cache_dsv4_context` / `llm_graph_input_dsv4`.
+- `csa_state` / `hca_state` / `lid_state` — `llama_dsv4_comp_state`: **ring compressor
+  states** (row id = `pos % ratio`; V4 CSA holds `2*ratio` rows of 2× width). The
+  compressed rows are **graph outputs** (per-ubatch `comp_plan` recipes: state
+  persist/restore/snapshot/commit), not normal token KV writes.
+
+Why the C API currently no-ops: `llama_forthllm_compact` does
+`dynamic_cast<llama_kv_cache *>(memory)` — `llama_kv_cache_dsv4` derives from
+`llama_memory_i`, not `llama_kv_cache`, so the cast fails and it logs "not supported: the
+context memory does not expose a full-attention KV cache". Additionally
+`llama_kv_cache_dsv4::get_can_shift()` returns **false** ("Compressed row metadata uses
+block-derived positions. Keep shifting disabled until DSV4 compressed-cache shift
+semantics are wired") — so the K-shift re-rotation machinery the Qwen3.5 path relies on
+is not available here.
+
+**Consequence:** ForthLLM-on-DSV4 is an open design problem, not a mechanical port. DSV4
+*already* compresses its KV (the block caches are the compression); ForthLLM would be a
+second compression on top, and the ring states are graph-computed, not stored rows we can
+summarize in place. Realistic targets, in decreasing confidence: (i) compact the `kv_raw`
+SWA cache — but it's a bounded window, so the win is small; (ii) operate on the compressed
+block caches — requires re-deriving the ring states (graph work); (iii) a DSV4-specific
+compaction that respects the `comp_plan`/ratio structure. **This needs its own design
+pass before implementation.** Do not attempt it as a "just make the cast succeed" change.
+
+#### Priority recommendation
+
+- Start with **4a**: self-contained, in the user's repo, unit-testable, and it removes the
+  known-broken placeholder (BWT invert, `sin()` summaries). Low context cost.
+- Then **4b** (moderate; makes the parsed flags real).
+- **4c** last, after a dedicated design pass — it is the user's actual model, so it is the
+  highest *value*, but it is now clearly the largest and least certain.
+
+#### Open questions
 
 - Quality: how much does S=1 per 512-token chunk hurt on real benchmarks? (The design
   doc's "Performance Comparison" table is unmeasured.)
@@ -429,8 +521,11 @@ with the real engine (or make the llama.vm copy a thin re-export), and update
   attention path; defer beyond MVP.
 - Interaction with `--context-shift` and KV cache quantization (`--cache-type-k q8_0`):
   summaries written back must be quantized to the cache type.
-- MLA (DeepSeek-V4) latent rows: summarizing the latent is shape-compatible, but the
-  rope-key component needs separate handling — verify on the actual model.
+- Where does the "stored representation" (4b squeezer output) live — llama.cpp state
+  save/load, or a llama.vm-managed side store? Decide during 4b.
+- DSV4: which of the three 4c targets (raw SWA / block caches / DSV4-specific) is worth
+  the design pass? Get the user's intent (do they want the *window* bounded, or the
+  *block caches* shrunk?) before designing.
 
 ## Reproduction / verification commands used
 
