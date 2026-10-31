@@ -434,11 +434,13 @@ Measured on a 28 GB Qwen3.6-27B Q8_0 (model on the page cache):
    Phase 4a is done: this repo's `include/forthllm/` + `src/forthllm.cpp` (+
    `squeezer`/`bwt`/`fm_index`/`jl_projector`) scaffold is now a faithful port of the
    tested llama.cpp engine (real summarize/stack/squeezer/BWT, no more `sin()`
-   summaries or broken BWT invert; `test_forthllm` + `test_squeezer` pass). Remaining
-   (Phase 4b/4c): wire the stored-representation options (`max_stack_depth`/`eviction`/
-   `squeezer`) into the cache path, and add MLA (DeepSeek-V4) support — note DSV4's
-   cache is a raw-SWA + compressed-block + ring-state structure, not a plain MLA
-   cache, so 4c needs its own design pass. See
+   summaries or broken BWT invert; `test_forthllm` + `test_squeezer` pass).
+   Phase 4b is done: `--forthllm-max-stack-depth` + `--forthllm-eviction` now take
+   effect in the compaction (the oldest chunks beyond the keep limit are dropped from
+   the context; validated E2E on Qwen3.8-27B). The `squeezer`/`jl_dim` are carried but
+   attach to state save/load (future). Remaining (Phase 4c): add MLA (DeepSeek-V4)
+   support — note DSV4's cache is a raw-SWA + compressed-block + ring-state structure,
+   not a plain MLA cache, so 4c needs its own design pass. See
    `llama-server-forthllm-investigation.md` (Phase 4 handoff).
 
 Done since the last revision: concurrency stress test (`test_concurrent`), swap
@@ -484,8 +486,9 @@ Qwen3.8-27B (qwen35, hybrid, IMROPE): a 2196-token prompt compacted to 180 cells
 (16 chunks, 2016 freed) with a correct, coherent answer. Patch:
 `patches/llama-cpp-forthllm-kv-compaction.patch`. **MVP limitations**: MLA caches
 (DeepSeek-V4 — the user's model), `hybrid_iswa`/`hybrid_idx`, speculative slots, and
-the stored-representation options (`max_stack_depth`/`eviction`/`squeezer`, parsed but
-not yet used by the cache path). This repo's `include/forthllm/` + `src/forthllm.cpp`
+the `squeezer`/`jl_dim` (carried but not yet used by the cache path — they attach to
+state save/load). `max_stack_depth`/`eviction` are wired (Phase 4b). This repo's
+`include/forthllm/` + `src/forthllm.cpp`
 (+ `squeezer`, `bwt`, `fm_index`, `jl_projector`) scaffold is now a faithful port of
 the tested llama.cpp engine (real summarize/stack/squeezer/BWT — no more `sin()`
 summaries or broken BWT invert; `test_forthllm` + `test_squeezer` pass) — Phase 4a

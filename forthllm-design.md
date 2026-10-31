@@ -6,10 +6,11 @@
 > hooks), validated end-to-end on Qwen3.8-27B. Patch:
 > `patches/llama-cpp-forthllm-kv-compaction.patch`.
 >
-> Still **aspirational** in the *Examples* below: the stored-representation options
-> (`--forthllm-max-stack-depth`, `--forthllm-eviction`, `--forthllm-squeezer`,
-> `--forthllm-jl-dim`) parse and validate but are not yet used by the cache path, and
-> MLA models (DeepSeek-V4) are a documented "not supported" compaction path.
+> `--forthllm-max-stack-depth` / `--forthllm-eviction` are wired (Phase 4b): the
+> oldest chunks beyond the keep limit are dropped from the context. Still
+> **aspirational**: `--forthllm-squeezer` / `--forthllm-jl-dim` parse and validate
+> but are not yet used by the cache path (they attach to state save/load), and MLA
+> models (DeepSeek-V4) are a documented "not supported" compaction path.
 >
 > **Phase 4a done (2026-10-31):** the library in `include/forthllm/` + `src/forthllm.cpp`
 > in *this repo* is now a faithful port of the tested llama.cpp engine (real

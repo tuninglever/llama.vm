@@ -83,7 +83,7 @@ index e6d6450f4..bfb7302e5 100644
          {"--hellaswag"},
          "compute HellaSwag score over random tasks from datafile supplied with -f",
 diff --git a/common/common.cpp b/common/common.cpp
-index de140a211..bdb1915f5 100644
+index de140a211..ae1379f06 100644
 --- a/common/common.cpp
 +++ b/common/common.cpp
 @@ -4,6 +4,7 @@
@@ -94,7 +94,7 @@ index de140a211..bdb1915f5 100644
  
  #include "../src/llama-ext.h"
  
-@@ -2216,6 +2217,21 @@ bool common_replay_last_token(struct llama_context * ctx, llama_token last_token
+@@ -2216,6 +2217,23 @@ bool common_replay_last_token(struct llama_context * ctx, llama_token last_token
      return true;
  }
  
@@ -105,9 +105,11 @@ index de140a211..bdb1915f5 100644
 +        struct llama_forthllm_chunk_range * chunk_info,
 +        int32_t n_chunk_max) {
 +    struct llama_forthllm_params params = {
-+        /*.chunk_size      =*/ forthllm.chunk_size,
-+        /*.summary_dim     =*/ forthllm.summary_dim,
-+        /*.summary_method  =*/ forthllm.summary_method.c_str(),
++        /*.chunk_size       =*/ forthllm.chunk_size,
++        /*.summary_dim      =*/ forthllm.summary_dim,
++        /*.summary_method   =*/ forthllm.summary_method.c_str(),
++        /*.max_stack_depth  =*/ forthllm.max_stack_depth,
++        /*.eviction         =*/ forthllm.eviction.c_str(),
 +    };
 +
 +    return llama_forthllm_compact(ctx, (int32_t) seq_id, &params, chunk_info, n_chunk_max);
@@ -172,10 +174,10 @@ index ab08d1591..d0351a447 100644
      bool display_prompt    = true;  // print prompt before generation
 diff --git a/include/llama-forthllm.h b/include/llama-forthllm.h
 new file mode 100644
-index 000000000..85393ada1
+index 000000000..1db277305
 --- /dev/null
 +++ b/include/llama-forthllm.h
-@@ -0,0 +1,172 @@
+@@ -0,0 +1,176 @@
 +#pragma once
 +
 +#include "llama.h"
@@ -316,6 +318,10 @@ index 000000000..85393ada1
 +    int32_t chunk_size;      // tokens per chunk (C); must be > 0
 +    int32_t summary_dim;     // summary rows per chunk (S); must be > 0, clamped to C
 +    const char * summary_method; // "attention" | "mean" | "last"
++    int32_t max_stack_depth; // max summarized chunks to keep (<= 0 = no limit); the
++                             // oldest chunks beyond this are dropped from the context
++    const char * eviction;   // "lru" | "lfu" | "fixed-window" (all currently drop the
++                             // oldest; importance-based eviction is future work)
 +};
 +
 +// info about one compacted chunk (filled by llama_forthllm_compact)
@@ -786,10 +792,10 @@ index 4141e3c9e..c6c7dc1c7 100644
  
  // deprecated
 diff --git a/src/llama-kv-cache.cpp b/src/llama-kv-cache.cpp
-index 00dbf7c94..614e2df01 100644
+index 00dbf7c94..8be1ea1e0 100644
 --- a/src/llama-kv-cache.cpp
 +++ b/src/llama-kv-cache.cpp
-@@ -1186,12 +1186,245 @@ bool llama_kv_cache::get_can_shift() const {
+@@ -1186,12 +1186,281 @@ bool llama_kv_cache::get_can_shift() const {
      if (model.arch == LLM_ARCH_STEP35) {
          return false;
      }
@@ -864,6 +870,13 @@ index 00dbf7c94..614e2df01 100644
 +    } catch (const std::exception & e) {
 +        return fail(e.what());
 +    }
++    // validate the eviction policy (all policies currently drop the oldest chunks;
++    // importance-based eviction is future work)
++    try {
++        llama_forthllm_eviction_from_str(params.eviction ? params.eviction : "lru");
++    } catch (const std::exception & e) {
++        return fail(e.what());
++    }
 +    if (seq_id < 0 || (size_t) seq_id >= seq_to_stream.size()) {
 +        return fail("invalid seq_id");
 +    }
@@ -909,6 +922,13 @@ index 00dbf7c94..614e2df01 100644
 +    const uint32_t n_chunks  = n_compact / C;
 +    const uint32_t n_skip    = n_compact % C;
 +
++    // max_stack_depth: keep at most this many summarized chunks; the oldest chunks
++    // beyond the limit are dropped from the context entirely (no summary rows)
++    const uint32_t n_keep = (params.max_stack_depth > 0)
++        ? std::min(n_chunks, (uint32_t) params.max_stack_depth)
++        : n_chunks;
++    const uint32_t n_drop = n_chunks - n_keep;
++
 +    int n_freed_total = 0;
 +
 +    for (uint32_t c = 0; c < n_chunks; ++c) {
@@ -934,6 +954,28 @@ index 00dbf7c94..614e2df01 100644
 +        }
 +        if (!ok) {
 +            continue; // skip this chunk, keep it raw
++        }
++
++        // the oldest chunks beyond max_stack_depth are dropped from the context
++        // entirely: all C cells are freed (no summary rows) and the subsequent cells
++        // shift left by C
++        if (c < n_drop) {
++            for (uint32_t j = 0; j < C; ++j) {
++                if (cells.seq_rm(idxs[i0 + j], seq_id) && idxs[i0 + j] < head) {
++                    head = idxs[i0 + j];
++                }
++            }
++            const llama_pos d = -(llama_pos) C;
++            for (uint32_t j = i0 + C; j < idxs.size(); ++j) {
++                cells.pos_add(idxs[j], d);
++            }
++            chunks.push_back({
++                pos_min + (llama_pos) (n_skip + c * C),
++                (int32_t) C,
++                (int32_t) C, // all cells freed (dropped, not summarized)
++            });
++            n_freed_total += (int) C;
++            continue;
 +        }
 +
 +        // summarize the chunk's K/V rows into S rows, per layer
@@ -1467,7 +1509,7 @@ index 000000000..254ea3da0
 +    return 0;
 +}
 diff --git a/tools/server/server-context.cpp b/tools/server/server-context.cpp
-index 9377e3c17..d43f5f608 100644
+index 9377e3c17..b5d2847f8 100644
 --- a/tools/server/server-context.cpp
 +++ b/tools/server/server-context.cpp
 @@ -2186,12 +2186,23 @@ private:
@@ -1499,7 +1541,7 @@ index 9377e3c17..d43f5f608 100644
          }
  
          // check the limits
-@@ -3758,6 +3769,52 @@ private:
+@@ -3758,6 +3769,58 @@ private:
          });
      }
  
@@ -1522,16 +1564,22 @@ index 9377e3c17..d43f5f608 100644
 +            return n_freed;
 +        }
 +
-+        // each compacted chunk frees exactly (C - S) cells, reported in order
-+        const int32_t n_chunks = n_freed / (C - S);
++        // count the reported chunks (filled entries have n_freed > 0 and are written
++        // contiguously from the start); a summarized chunk frees (C - S) but a dropped
++        // chunk frees C, so n_freed alone does not give the count
++        int32_t n_chunks = 0;
++        while (n_chunks < (int32_t) chunks.size() && chunks[n_chunks].n_freed > 0) {
++            ++n_chunks;
++        }
 +
-+        // remove the compacted tokens from the prompt (back-to-front, so the earlier
-+        // ranges keep their indices); the summary rows occupy the first S tokens of
-+        // each chunk, so those stay
++        // remove the compacted/dropped tokens from the prompt (back-to-front, so the
++        // earlier ranges keep their indices); a summarized chunk keeps its first
++        // S = n_tokens - n_freed tokens (the summary rows), a dropped chunk keeps none
 +        llama_tokens new_tokens = slot.prompt.tokens.get_tokens(); // copy
 +        for (int32_t i = n_chunks - 1; i >= 0; --i) {
 +            const auto & cr = chunks[i];
-+            const size_t begin = (size_t) cr.pos0 + (size_t) S;
++            const size_t keep  = (size_t) cr.n_tokens - (size_t) cr.n_freed;
++            const size_t begin = (size_t) cr.pos0 + keep;
 +            const size_t end   = (size_t) cr.pos0 + (size_t) cr.n_tokens;
 +            if (begin < new_tokens.size() && end <= new_tokens.size()) {
 +                new_tokens.erase(new_tokens.begin() + begin, new_tokens.begin() + end);
@@ -1552,7 +1600,7 @@ index 9377e3c17..d43f5f608 100644
      void pre_decode() {
          // apply context-shift if needed
          // TODO: simplify and improve
-@@ -3767,6 +3824,14 @@ private:
+@@ -3767,6 +3830,14 @@ private:
                  return;
              }
              if (slot.state == SLOT_STATE_GENERATING && slot.prompt.n_tokens() + 1 >= slot.n_ctx) {
@@ -1567,7 +1615,7 @@ index 9377e3c17..d43f5f608 100644
                  if (!params_base.ctx_shift) {
                      // this check is redundant (for good)
                      // we should never get here, because generation should already stopped in process_token()
-@@ -4853,6 +4918,20 @@ private:
+@@ -4853,6 +4924,20 @@ private:
  
                  GGML_ASSERT(slot.task->need_sampling());
  

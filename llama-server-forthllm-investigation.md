@@ -461,16 +461,30 @@ files to test real behavior. `fm_index` is not used by the real engine — keep 
 standalone tested utility or drop it (low cost either way). Do **not** copy the scaffold's
 BWT into llama.cpp; the llama.cpp one is the fixed, tested version.
 
-#### 4b — wire `max_stack_depth` / `eviction` / `squeezer` into the cache path (llama.cpp)
+#### 4b — wire `max_stack_depth` / `eviction` / `squeezer` into the cache path (llama.cpp) — **DONE (2026-10-31)**
 
-These three flags parse (Phase 1) but are not yet used by the compaction path —
-`llama_forthllm_compact` only takes `chunk_size` / `summary_dim` / `summary_method`.
-Wiring them means: (1) the C API / `common_params_forthllm` must carry the full
-`llama_forthllm_config` into `forthllm_compact`; (2) the server hook must maintain a
-`llama_forthllm_stack` per slot (push on compact, `evict()` when over `max_stack_depth`,
-drop the evicted chunks' summary rows from the KV cache); (3) the `squeezer` is for the
-stored/offloaded representation, not the in-cache rows (which stay head-dim) — so it
-attaches to state save/load, not the compaction itself.
+**Design (implemented 2026-10-31):** rather than driving eviction from a per-slot
+`llama_forthllm_stack` in the server hook, the eviction is integrated into
+`llama_kv_cache::forthllm_compact` itself. The compaction already processes chunks
+oldest→newest and re-derives the layout from the cells each call, so a persistent stack
+doesn't fit; instead:
+- `llama_forthllm_params` gains `max_stack_depth` + `eviction` (carried from
+  `common_params_forthllm` through `common_forthllm_compact`). `max_stack_depth <= 0`
+  means no limit (the previous behavior).
+- The compaction computes `n_keep = min(n_chunks, max_stack_depth)`, `n_drop =
+  n_chunks - n_keep`. In the chunk loop, the oldest `n_drop` chunks are **dropped
+  entirely** (all C cells freed, subsequent cells shifted left by C, no summary rows);
+  the most recent `n_keep` chunks are summarized as before (C-S freed). All three
+  eviction policies currently reduce to "drop the oldest" (importance/lfu needs
+  per-chunk attention counts — future work).
+- A dropped chunk is reported in `chunks` as `{pos0, n_tokens=C, n_freed=C}` (so
+  `n_summary = 0`); the server's token-sync now counts filled entries (not
+  `n_freed/(C-S)`) and erases `[pos0 + (n_tokens - n_freed), pos0 + n_tokens)` per
+  chunk — which erases the whole chunk when dropped and `[pos0+S, pos0+C)` when
+  summarized.
+- The `squeezer`/`jl_dim` are carried in `common_params_forthllm` but are **not** passed
+  to the C API yet: they are for the stored/offloaded representation (in-cache summary
+  rows stay head-dim), so they attach to state save/load — future work.
 
 #### 4c — MLA / DeepSeek-V4 support (the user's actual model) — **bigger than expected**
 
