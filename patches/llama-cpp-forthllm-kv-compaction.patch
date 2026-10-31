@@ -1,0 +1,1590 @@
+diff --git a/common/arg.cpp b/common/arg.cpp
+index e6d6450f4..bfb7302e5 100644
+--- a/common/arg.cpp
++++ b/common/arg.cpp
+@@ -4,6 +4,7 @@
+ #include "chat.h"
+ #include "common.h"
+ #include "download.h"
++#include "llama-forthllm.h"
+ #include "json-schema-to-grammar.h"
+ #include "json.h"
+ #include "llama.h"
+@@ -2471,6 +2472,71 @@ common_params_context common_params_parser_init(common_params & params, llama_ex
+             params.cache_type_v = kv_cache_type_from_str(value);
+         }
+     ).set_env("LLAMA_ARG_CACHE_TYPE_V"));
++    add_opt(common_arg(
++        {"--forthllm"},
++        "enable ForthLLM chunked context compression: old prompt chunks are replaced by a few KV summary rows (see --forthllm-*)",
++        [](common_params & params) {
++            params.forthllm.enabled = true;
++        }
++    ).set_env("LLAMA_ARG_FORTHLLM").set_examples({LLAMA_EXAMPLE_SERVER}));
++    add_opt(common_arg(
++        {"--forthllm-chunk-size"}, "N",
++        string_format("ForthLLM: tokens per chunk (default: %d)", params.forthllm.chunk_size),
++        [](common_params & params, int value) {
++            params.forthllm.chunk_size = value;
++            params.forthllm.enabled = true;
++        }
++    ).set_env("LLAMA_ARG_FORTHLLM_CHUNK_SIZE").set_examples({LLAMA_EXAMPLE_SERVER}));
++    add_opt(common_arg(
++        {"--forthllm-summary-method"}, "METHOD",
++        string_format("ForthLLM: chunk summary method (attention|mean|last, default: %s)", params.forthllm.summary_method.c_str()),
++        [](common_params & params, const std::string & value) {
++            // throws on unknown; store the normalized lowercase name
++            params.forthllm.summary_method =
++                llama_forthllm_summary_method_name(llama_forthllm_summary_method_from_str(value));
++            params.forthllm.enabled = true;
++        }
++    ).set_env("LLAMA_ARG_FORTHLLM_SUMMARY_METHOD").set_examples({LLAMA_EXAMPLE_SERVER}));
++    add_opt(common_arg(
++        {"--forthllm-summary-dim"}, "N",
++        string_format("ForthLLM: summary rows per chunk (default: %d)", params.forthllm.summary_dim),
++        [](common_params & params, int value) {
++            params.forthllm.summary_dim = value;
++            params.forthllm.enabled = true;
++        }
++    ).set_env("LLAMA_ARG_FORTHLLM_SUMMARY_DIM").set_examples({LLAMA_EXAMPLE_SERVER}));
++    add_opt(common_arg(
++        {"--forthllm-max-stack-depth"}, "N",
++        string_format("ForthLLM: max summarized chunks to keep (default: %d)", params.forthllm.max_stack_depth),
++        [](common_params & params, int value) {
++            params.forthllm.max_stack_depth = value;
++            params.forthllm.enabled = true;
++        }
++    ).set_env("LLAMA_ARG_FORTHLLM_MAX_STACK_DEPTH").set_examples({LLAMA_EXAMPLE_SERVER}));
++    add_opt(common_arg(
++        {"--forthllm-eviction"}, "POLICY",
++        string_format("ForthLLM: eviction policy (lru|lfu|fixed-window, default: %s)", params.forthllm.eviction.c_str()),
++        [](common_params & params, const std::string & value) {
++            params.forthllm.eviction = llama_forthllm_eviction_from_str(value); // throws on unknown
++            params.forthllm.enabled = true;
++        }
++    ).set_env("LLAMA_ARG_FORTHLLM_EVICTION").set_examples({LLAMA_EXAMPLE_SERVER}));
++    add_opt(common_arg(
++        {"--forthllm-squeezer"}, "NAME",
++        string_format("ForthLLM: squeezer for stored summaries (none|jl-bwt, default: %s)", params.forthllm.squeezer.c_str()),
++        [](common_params & params, const std::string & value) {
++            params.forthllm.squeezer = llama_forthllm_squeezer_from_str(value); // throws on unknown
++            params.forthllm.enabled = true;
++        }
++    ).set_env("LLAMA_ARG_FORTHLLM_SQUEEZER").set_examples({LLAMA_EXAMPLE_SERVER}));
++    add_opt(common_arg(
++        {"--forthllm-jl-dim"}, "N",
++        string_format("ForthLLM: JL projection dim for the squeezer (default: %d)", params.forthllm.jl_dim),
++        [](common_params & params, int value) {
++            params.forthllm.jl_dim = value;
++            params.forthllm.enabled = true;
++        }
++    ).set_env("LLAMA_ARG_FORTHLLM_JL_DIM").set_examples({LLAMA_EXAMPLE_SERVER}));
+     add_opt(common_arg(
+         {"--hellaswag"},
+         "compute HellaSwag score over random tasks from datafile supplied with -f",
+diff --git a/common/common.cpp b/common/common.cpp
+index de140a211..bdb1915f5 100644
+--- a/common/common.cpp
++++ b/common/common.cpp
+@@ -4,6 +4,7 @@
+ 
+ #include "build-info.h"
+ #include "common.h"
++#include "llama-forthllm.h"
+ 
+ #include "../src/llama-ext.h"
+ 
+@@ -2216,6 +2217,21 @@ bool common_replay_last_token(struct llama_context * ctx, llama_token last_token
+     return true;
+ }
+ 
++int common_forthllm_compact(
++        struct llama_context * ctx,
++        llama_seq_id seq_id,
++        const struct common_params_forthllm & forthllm,
++        struct llama_forthllm_chunk_range * chunk_info,
++        int32_t n_chunk_max) {
++    struct llama_forthllm_params params = {
++        /*.chunk_size      =*/ forthllm.chunk_size,
++        /*.summary_dim     =*/ forthllm.summary_dim,
++        /*.summary_method  =*/ forthllm.summary_method.c_str(),
++    };
++
++    return llama_forthllm_compact(ctx, (int32_t) seq_id, &params, chunk_info, n_chunk_max);
++}
++
+ common_batch::common_batch(llama_context * ctx) : batch(llama_batch_ext_init(ctx)) {
+     const auto rope_type = llama_model_rope_type(llama_get_model(ctx));
+     n_pos = rope_type == LLAMA_ROPE_TYPE_MROPE || rope_type == LLAMA_ROPE_TYPE_IMROPE ? GGML_MROPE_SECTIONS : 1;
+diff --git a/common/common.h b/common/common.h
+index ab08d1591..d0351a447 100644
+--- a/common/common.h
++++ b/common/common.h
+@@ -7,6 +7,7 @@
+ #include "ggml-opt.h"
+ #include "ggml.h"
+ #include "llama.h"
++#include "llama-forthllm.h"
+ 
+ #include <array>
+ #include <list>
+@@ -454,6 +455,32 @@ struct lr_opt {
+ 
+ struct ggml_opt_optimizer_params common_opt_lr_pars(void * userdata);
+ 
++// ForthLLM: chunked context compression (see include/llama-forthllm.h). Old prompt
++// chunks are replaced by a few KV summary rows so the KV cache stops growing linearly
++// with context. Any --forthllm-* flag also sets enabled.
++struct common_params_forthllm {
++    bool        enabled         = false;       // master switch
++    int32_t     chunk_size      = 128;         // tokens per chunk
++    std::string summary_method  = "attention"; // attention|mean|last
++    int32_t     summary_dim     = 1;           // summary rows per chunk
++    int32_t     max_stack_depth = 64;          // max summarized chunks to keep
++    std::string eviction        = "lru";       // lru|lfu|fixed-window
++    std::string squeezer        = "none";      // none|jl-bwt
++    int32_t     jl_dim          = 128;         // JL projection dim (squeezer)
++};
++
++// ForthLLM: compact the KV cache of seq_id in ctx (see llama_forthllm_compact).
++// Returns the number of freed cells, 0 if nothing was compacted, or a negative value
++// on error. The per-chunk ranges (pre-compaction position space) are written to
++// chunk_info (up to n_chunk_max entries) so the caller can keep its token bookkeeping
++// in sync.
++int common_forthllm_compact(
++        struct llama_context * ctx,
++        llama_seq_id seq_id,
++        const struct common_params_forthllm & forthllm,
++        struct llama_forthllm_chunk_range * chunk_info,
++        int32_t n_chunk_max);
++
+ struct common_params {
+     int32_t n_predict             =    -1; // max. number of new tokens to predict, -1 == no limit
+     int32_t n_ctx                 =     0; // context size, 0 == context the model was trained with
+@@ -581,6 +608,8 @@ struct common_params {
+     bool swa_full          = false; // use full-size SWA cache (https://github.com/ggml-org/llama.cpp/pull/13194#issuecomment-2868343055)
+     bool kv_unified        = false; // enable unified KV cache
+ 
++    struct common_params_forthllm forthllm; // ForthLLM chunked context compression
++
+     bool input_prefix_bos  = false; // prefix BOS to user inputs, preceding input_prefix
+     bool verbose_prompt    = false; // print prompt tokens before generation
+     bool display_prompt    = true;  // print prompt before generation
+diff --git a/include/llama-forthllm.h b/include/llama-forthllm.h
+new file mode 100644
+index 000000000..85393ada1
+--- /dev/null
++++ b/include/llama-forthllm.h
+@@ -0,0 +1,172 @@
++#pragma once
++
++#include "llama.h"
++
++#include <cstddef>
++#include <cstdint>
++#include <string>
++#include <vector>
++
++//
++// ForthLLM: chunked context compression
++//
++// Old prompt chunks (C tokens) are replaced by a small number (S << C) of KV summary
++// rows. Each summary row is a weighted combination of the chunk's K/V rows (per layer,
++// per KV head), so the row shape is preserved and the attention graph is untouched: an
++// old chunk occupies S KV cells instead of C, and the KV cache stops growing linearly
++// with context.
++//
++// llama_forthllm_compact() performs the KV-cache surgery (read rows, summarize, write
++// back, free cells, shift positions). The model-agnostic math (summarization, chunk
++// stack, squeezer, BWT) is in the C++ section below and is exercised by
++// tests/test-forthllm.cpp.
++
++#ifdef __cplusplus
++
++struct llama_forthllm_config {
++    int32_t chunk_size      = 128;   // tokens per chunk
++    int32_t summary_dim     = 1;     // number of summary rows per chunk (S)
++    std::string summary_method = "attention"; // "attention" | "mean" | "last"
++    int32_t max_stack_depth = 64;    // maximum number of summarized chunks to keep
++    std::string eviction    = "lru"; // "lru" | "lfu" | "fixed-window"
++    std::string squeezer    = "none"; // "none" | "jl-bwt"
++    int32_t jl_dim          = 128;   // JL projection output dim (squeezer)
++
++    // throws std::runtime_error with a descriptive message on invalid values
++    void validate() const;
++};
++
++enum llama_forthllm_summary_method {
++    LLAMA_FORTHLLM_SUMMARY_ATTENTION = 0,
++    LLAMA_FORTHLLM_SUMMARY_MEAN      = 1,
++    LLAMA_FORTHLLM_SUMMARY_LAST      = 2,
++};
++
++// parses "attention" | "mean" | "last" (case-insensitive); throws std::runtime_error
++llama_forthllm_summary_method llama_forthllm_summary_method_from_str(const std::string & s);
++const char * llama_forthllm_summary_method_name(llama_forthllm_summary_method m);
++// parse+validate (case-insensitive) an eviction policy; returns the normalized name,
++// throws std::runtime_error on unknown
++std::string llama_forthllm_eviction_from_str(const std::string & s);
++// parse+validate (case-insensitive) a squeezer name; returns the normalized name,
++// throws std::runtime_error on unknown
++std::string llama_forthllm_squeezer_from_str(const std::string & s);
++
++// Summarize one chunk of KV rows (all KV heads of one layer) into S summary rows.
++// k: [C][n_heads_k*head_dim_k], v: [C][n_heads_v*head_dim_v], row-major
++// (head_dim_k and head_dim_v may differ; n_heads_k == n_heads_v == n_head_kv).
++//   attention: the chunk is split into S contiguous sub-chunks; for each, per-head
++//              weights w_i = softmax(k_i[h] . k_last[h] / sqrt(head_dim_k)) (last-key
++//              similarity within the sub-chunk) are applied to both K and V rows
++//   mean:      the chunk is split into S contiguous sub-chunks, each uniformly pooled
++//   last:      the last S rows are kept verbatim
++// k_out/v_out: [S][...]. S is clamped to C.
++void llama_forthllm_summarize(
++        const float * k, size_t n_heads_k, size_t head_dim_k,
++        const float * v, size_t n_heads_v, size_t head_dim_v,
++               size_t C, size_t S,
++        llama_forthllm_summary_method method,
++        std::vector<float> & k_out, std::vector<float> & v_out);
++
++// one summarized chunk on the stack
++struct llama_forthllm_chunk_info {
++    size_t chunk_id   = 0;    // prompt-order index of the chunk
++    size_t n_tokens   = 0;    // raw tokens in the chunk
++    size_t n_summary  = 0;    // summary rows in the KV cache
++    float  importance  = 1.0f; // eviction importance (higher = keep)
++};
++
++// Stack of summarized chunks with an eviction policy. When the stack exceeds
++// max_stack_depth, evict() returns the chunk_ids whose summaries should be dropped
++// from the KV cache entirely (the chunk's content leaves the context).
++//   lru:          least important (ties: oldest) — "use" is tracked by the caller
++//   lfu:          falls back to lru until per-chunk attention counts are available
++//   fixed-window: keep only the most recent max_stack_depth chunks
++class llama_forthllm_stack {
++public:
++    explicit llama_forthllm_stack(const llama_forthllm_config & cfg);
++
++    void push(const llama_forthllm_chunk_info & info);
++    std::vector<size_t> evict(); // chunk_ids to drop; may be called repeatedly
++    size_t size() const;
++    const llama_forthllm_chunk_info & at(size_t i) const;
++
++private:
++    llama_forthllm_config cfg_;
++    std::vector<llama_forthllm_chunk_info> stack_;
++};
++
++// Squeezer: compress a float vector for storage (JL projection -> 8-bit quantization
++// -> BWT). The in-cache summary rows stay head-dim; the squeezer is used for the
++// stored/offloaded representation. The JL projection is not invertible: expand()
++// returns the dequantized jl_dim-dim projection, within the quantization error.
++class llama_forthllm_squeezer {
++public:
++    explicit llama_forthllm_squeezer(size_t output_dim, uint32_t seed = 0);
++
++    // deterministic Gaussian projection (N(0, 1/output_dim)), same matrix for all
++    // calls with the same seed
++    std::vector<float> project(const std::vector<float> & embedding) const;
++
++    std::string squeeze(const std::vector<float> & embedding) const;
++    std::vector<float> expand(const std::string & compressed) const;
++
++    size_t output_dim() const;
++
++private:
++    size_t output_dim_;
++    uint32_t seed_;
++};
++
++// BWT (Burrows-Wheeler transform) over a byte string. transform is O(n^2 log n)
++// (summary-sized data only); invert is O(n log n) via the LF mapping and is exact
++// for any byte content (the original row index is stored in the blob).
++std::string llama_forthllm_bwt_transform(const std::string & input);
++std::string llama_forthllm_bwt_invert(const std::string & blob);
++
++#endif // __cplusplus
++
++//
++// C API
++//
++
++#ifdef __cplusplus
++extern "C" {
++#endif
++
++struct llama_forthllm_params {
++    int32_t chunk_size;      // tokens per chunk (C); must be > 0
++    int32_t summary_dim;     // summary rows per chunk (S); must be > 0, clamped to C
++    const char * summary_method; // "attention" | "mean" | "last"
++};
++
++// info about one compacted chunk (filled by llama_forthllm_compact)
++// positions are in the pre-compaction position space
++struct llama_forthllm_chunk_range {
++    llama_pos pos0;    // first position of the chunk
++    int32_t n_tokens;  // tokens in the chunk
++    int32_t n_freed;   // cells freed (n_tokens - n_summary)
++};
++
++// Compact the KV cache of seq_id: every old chunk of chunk_size tokens is replaced by
++// summary_dim summary rows (the last chunk_size tokens are kept raw), and the
++// positions after each chunk are shifted left by (C - S) so the sequence stays
++// contiguous. The keys of the shifted cells are re-rotated to their new positions by
++// the cache's K-shift mechanism on the next compute.
++//
++// Supported: full-attention caches (llama_kv_cache), flash attention enabled
++// (non-transposed V cache), KV cache on the host, single-sequence cells.
++//
++// Returns the total number of freed cells (0 if nothing was compacted), or a negative
++// value on error (a message is logged).
++// chunk_info: if non-NULL, receives one entry per compacted chunk (up to n_chunk_max).
++LLAMA_API int llama_forthllm_compact(
++        struct llama_context * ctx,
++        int32_t seq_id,
++        const struct llama_forthllm_params * params,
++        struct llama_forthllm_chunk_range * chunk_info,
++        int32_t n_chunk_max);
++
++#ifdef __cplusplus
++}
++#endif
+diff --git a/src/CMakeLists.txt b/src/CMakeLists.txt
+index 97250c2e8..4732d5883 100644
+--- a/src/CMakeLists.txt
++++ b/src/CMakeLists.txt
+@@ -9,6 +9,7 @@ llama_add_compile_flags()
+ file(GLOB LLAMA_MODELS_SOURCES "models/*.cpp")
+ 
+ set(LLAMA_CORE_SOURCES
++    forthllm.cpp
+     llama.cpp
+     llama-adapter.cpp
+     llama-arch.cpp
+diff --git a/src/forthllm.cpp b/src/forthllm.cpp
+new file mode 100644
+index 000000000..9ed24e2f2
+--- /dev/null
++++ b/src/forthllm.cpp
+@@ -0,0 +1,340 @@
++#include "llama-forthllm.h"
++
++#include <algorithm>
++#include <array>
++#include <cmath>
++#include <cstring>
++#include <numeric>
++#include <random>
++#include <stdexcept>
++
++void llama_forthllm_config::validate() const {
++    if (chunk_size <= 0) {
++        throw std::runtime_error("forthllm: chunk_size must be > 0");
++    }
++    if (summary_dim <= 0) {
++        throw std::runtime_error("forthllm: summary_dim must be > 0");
++    }
++    if (summary_dim > chunk_size) {
++        throw std::runtime_error("forthllm: summary_dim (" + std::to_string(summary_dim) +
++                                 ") must be <= chunk_size (" + std::to_string(chunk_size) + ")");
++    }
++    if (max_stack_depth <= 0) {
++        throw std::runtime_error("forthllm: max_stack_depth must be > 0");
++    }
++    llama_forthllm_eviction_from_str(eviction); // throws on unknown
++    llama_forthllm_squeezer_from_str(squeezer); // throws on unknown
++    if (squeezer == "jl-bwt" && jl_dim <= 0) {
++        throw std::runtime_error("forthllm: jl_dim must be > 0 when the squeezer is jl-bwt");
++    }
++    llama_forthllm_summary_method_from_str(summary_method); // throws on unknown
++}
++
++llama_forthllm_summary_method llama_forthllm_summary_method_from_str(const std::string & s) {
++    std::string l = s;
++    std::transform(l.begin(), l.end(), l.begin(), ::tolower);
++    if (l == "attention") {
++        return LLAMA_FORTHLLM_SUMMARY_ATTENTION;
++    }
++    if (l == "mean") {
++        return LLAMA_FORTHLLM_SUMMARY_MEAN;
++    }
++    if (l == "last") {
++        return LLAMA_FORTHLLM_SUMMARY_LAST;
++    }
++    throw std::runtime_error("forthllm: unknown summary method '" + s + "' (use attention|mean|last)");
++}
++
++const char * llama_forthllm_summary_method_name(llama_forthllm_summary_method m) {
++    switch (m) {
++        case LLAMA_FORTHLLM_SUMMARY_ATTENTION: return "attention";
++        case LLAMA_FORTHLLM_SUMMARY_MEAN:      return "mean";
++        case LLAMA_FORTHLLM_SUMMARY_LAST:      return "last";
++    }
++    return "unknown";
++}
++
++std::string llama_forthllm_eviction_from_str(const std::string & s) {
++    std::string l = s;
++    std::transform(l.begin(), l.end(), l.begin(), ::tolower);
++    if (l == "lru" || l == "lfu" || l == "fixed-window") {
++        return l;
++    }
++    throw std::runtime_error("forthllm: unknown eviction policy '" + s + "' (use lru|lfu|fixed-window)");
++}
++
++std::string llama_forthllm_squeezer_from_str(const std::string & s) {
++    std::string l = s;
++    std::transform(l.begin(), l.end(), l.begin(), ::tolower);
++    if (l == "none" || l == "jl-bwt") {
++        return l;
++    }
++    throw std::runtime_error("forthllm: unknown squeezer '" + s + "' (use none|jl-bwt)");
++}
++
++void llama_forthllm_summarize(
++        const float * k, size_t n_heads_k, size_t head_dim_k,
++        const float * v, size_t n_heads_v, size_t head_dim_v,
++               size_t C, size_t S,
++        llama_forthllm_summary_method method,
++        std::vector<float> & k_out, std::vector<float> & v_out) {
++    if (C == 0 || S == 0) {
++        k_out.clear();
++        v_out.clear();
++        return;
++    }
++    S = std::min(S, C);
++    const size_t kv_dim_k = n_heads_k * head_dim_k;
++    const size_t kv_dim_v = n_heads_v * head_dim_v;
++    k_out.assign(S * kv_dim_k, 0.0f);
++    v_out.assign(S * kv_dim_v, 0.0f);
++
++    if (method == LLAMA_FORTHLLM_SUMMARY_LAST) {
++        for (size_t s = 0; s < S; ++s) {
++            const size_t i = C - S + s;
++            std::memcpy(&k_out[s * kv_dim_k], &k[i * kv_dim_k], kv_dim_k * sizeof(float));
++            std::memcpy(&v_out[s * kv_dim_v], &v[i * kv_dim_v], kv_dim_v * sizeof(float));
++        }
++        return;
++    }
++
++    // split the chunk into S contiguous sub-chunks (even split; the boundaries are
++    // floor(i*C/S) so every sub-chunk is non-empty); pool each sub-chunk with
++    // per-head weights (head h's K and V rows are pooled with head h's weights)
++    for (size_t s = 0; s < S; ++s) {
++        const size_t i0 = (s * C) / S;
++        const size_t i1 = ((s + 1) * C) / S;
++        const size_t n  = i1 - i0;
++
++        // per-head weights from the K rows (last-key similarity within the
++        // sub-chunk: the sub-chunk's last key stands in for the query, so rows
++        // similar to it get the most weight)
++        std::vector<std::vector<float>> W(n_heads_k, std::vector<float>(n, 1.0f / (float) n));
++        if (method == LLAMA_FORTHLLM_SUMMARY_ATTENTION) {
++            for (size_t h = 0; h < n_heads_k; ++h) {
++                const float * q = &k[(i1 - 1) * kv_dim_k + h * head_dim_k];
++                float max_score = -INFINITY;
++                for (size_t i = 0; i < n; ++i) {
++                    const float * kr = &k[(i0 + i) * kv_dim_k + h * head_dim_k];
++                    float dot = 0.0f;
++                    for (size_t j = 0; j < head_dim_k; ++j) {
++                        dot += kr[j] * q[j];
++                    }
++                    W[h][i] = dot / std::sqrt((float) head_dim_k);
++                    max_score = std::max(max_score, W[h][i]);
++                }
++                float sum = 0.0f;
++                for (size_t i = 0; i < n; ++i) {
++                    W[h][i] = std::exp(W[h][i] - max_score);
++                    sum += W[h][i];
++                }
++                for (size_t i = 0; i < n; ++i) {
++                    W[h][i] /= sum;
++                }
++            }
++        }
++
++        for (size_t h = 0; h < n_heads_k; ++h) {
++            for (size_t j = 0; j < head_dim_k; ++j) {
++                float ak = 0.0f;
++                for (size_t i = 0; i < n; ++i) {
++                    ak += W[h][i] * k[(i0 + i) * kv_dim_k + h * head_dim_k + j];
++                }
++                k_out[s * kv_dim_k + h * head_dim_k + j] = ak;
++            }
++        }
++        for (size_t h = 0; h < n_heads_v; ++h) {
++            for (size_t j = 0; j < head_dim_v; ++j) {
++                float av = 0.0f;
++                for (size_t i = 0; i < n; ++i) {
++                    av += W[h][i] * v[(i0 + i) * kv_dim_v + h * head_dim_v + j];
++                }
++                v_out[s * kv_dim_v + h * head_dim_v + j] = av;
++            }
++        }
++    }
++}
++
++llama_forthllm_stack::llama_forthllm_stack(const llama_forthllm_config & cfg) : cfg_(cfg) {}
++
++void llama_forthllm_stack::push(const llama_forthllm_chunk_info & info) {
++    stack_.push_back(info);
++}
++
++std::vector<size_t> llama_forthllm_stack::evict() {
++    std::vector<size_t> to_drop;
++    if (stack_.size() <= (size_t) cfg_.max_stack_depth) {
++        return to_drop;
++    }
++    if (cfg_.eviction == "fixed-window") {
++        // keep only the most recent max_stack_depth chunks
++        const size_t n_drop = stack_.size() - (size_t) cfg_.max_stack_depth;
++        for (size_t i = 0; i < n_drop; ++i) {
++            to_drop.push_back(stack_[i].chunk_id);
++        }
++        stack_.erase(stack_.begin(), stack_.begin() + n_drop);
++        return to_drop;
++    }
++    // lru (and lfu, which falls back to lru until per-chunk attention counts are
++    // available): drop the least important, ties broken by oldest
++    while (stack_.size() > (size_t) cfg_.max_stack_depth) {
++        size_t worst = 0;
++        for (size_t i = 1; i < stack_.size(); ++i) {
++            if (stack_[i].importance < stack_[worst].importance) {
++                worst = i;
++            }
++        }
++        to_drop.push_back(stack_[worst].chunk_id);
++        stack_.erase(stack_.begin() + worst);
++    }
++    return to_drop;
++}
++
++size_t llama_forthllm_stack::size() const {
++    return stack_.size();
++}
++
++const llama_forthllm_chunk_info & llama_forthllm_stack::at(size_t i) const {
++    return stack_.at(i);
++}
++
++llama_forthllm_squeezer::llama_forthllm_squeezer(size_t output_dim, uint32_t seed)
++    : output_dim_(output_dim), seed_(seed) {
++    if (output_dim == 0) {
++        throw std::runtime_error("forthllm: squeezer output_dim must be > 0");
++    }
++}
++
++std::vector<float> llama_forthllm_squeezer::project(const std::vector<float> & embedding) const {
++    std::mt19937 gen(seed_);
++    std::normal_distribution<float> dist(0.0f, 1.0f / std::sqrt((float) output_dim_));
++    std::vector<float> result(output_dim_, 0.0f);
++    for (auto & r : result) {
++        for (size_t j = 0; j < embedding.size(); ++j) {
++            r += dist(gen) * embedding[j];
++        }
++    }
++    return result;
++}
++
++std::string llama_forthllm_squeezer::squeeze(const std::vector<float> & embedding) const {
++    const std::vector<float> projected = project(embedding);
++
++    // 8-bit quantization with a per-vector min/max scale (real KV data is not
++    // confined to [-1, 1])
++    float lo = projected.front();
++    float hi = projected.front();
++    for (float x : projected) {
++        lo = std::min(lo, x);
++        hi = std::max(hi, x);
++    }
++    const float scale = (hi > lo) ? 255.0f / (hi - lo) : 0.0f;
++    std::string bytes(projected.size(), '\0');
++    for (size_t i = 0; i < projected.size(); ++i) {
++        bytes[i] = (char) (uint8_t) std::lround((projected[i] - lo) * scale);
++    }
++
++    std::string blob = llama_forthllm_bwt_transform(bytes);
++    blob.append(reinterpret_cast<const char *>(&lo), sizeof(lo));
++    blob.append(reinterpret_cast<const char *>(&hi), sizeof(hi));
++    return blob;
++}
++
++std::vector<float> llama_forthllm_squeezer::expand(const std::string & compressed) const {
++    if (compressed.size() < 8) {
++        throw std::runtime_error("forthllm: invalid squeezer blob");
++    }
++    const size_t n_bwt = compressed.size() - 8;
++    float lo, hi;
++    std::memcpy(&lo, compressed.data() + n_bwt, sizeof(lo));
++    std::memcpy(&hi, compressed.data() + n_bwt + sizeof(hi), sizeof(hi));
++    const std::string bytes = llama_forthllm_bwt_invert(compressed.substr(0, n_bwt));
++    const float scale = (hi > lo) ? (hi - lo) / 255.0f : 0.0f;
++    std::vector<float> out(bytes.size());
++    for (size_t i = 0; i < bytes.size(); ++i) {
++        out[i] = lo + (float) (uint8_t) bytes[i] * scale;
++    }
++    return out;
++}
++
++size_t llama_forthllm_squeezer::output_dim() const {
++    return output_dim_;
++}
++
++std::string llama_forthllm_bwt_transform(const std::string & input) {
++    const size_t n = input.size();
++    if (n == 0) {
++        return "";
++    }
++    // sort the rotations; the start index breaks ties so the transform is
++    // invertible for any byte content (no unique sentinel needed)
++    std::vector<size_t> order(n);
++    std::iota(order.begin(), order.end(), 0);
++    std::sort(order.begin(), order.end(), [&](size_t a, size_t b) {
++        // compare as uint8_t: char is signed on most platforms, and signed
++        // comparison corrupts the rotation order for bytes >= 128 (invert()
++        // assumes the unsigned byte order)
++        for (size_t i = 0; i < n; ++i) {
++            const uint8_t ca = (uint8_t) input[(a + i) % n];
++            const uint8_t cb = (uint8_t) input[(b + i) % n];
++            if (ca != cb) {
++                return ca < cb;
++            }
++        }
++        return a < b;
++    });
++    std::string out(n, '\0');
++    for (size_t r = 0; r < n; ++r) {
++        out[r] = input[(order[r] + n - 1) % n];
++    }
++    // store the row of the original string (rotation 0) for invert()
++    uint32_t r0 = 0;
++    for (size_t r = 0; r < n; ++r) {
++        if (order[r] == 0) {
++            r0 = (uint32_t) r;
++            break;
++        }
++    }
++    out.append(reinterpret_cast<const char *>(&r0), sizeof(r0));
++    return out;
++}
++
++std::string llama_forthllm_bwt_invert(const std::string & blob) {
++    if (blob.size() < sizeof(uint32_t)) {
++        throw std::runtime_error("forthllm: invalid BWT blob");
++    }
++    const size_t n = blob.size() - sizeof(uint32_t);
++    const std::string & L = blob.substr(0, n);
++    uint32_t r0;
++    std::memcpy(&r0, blob.data() + n, sizeof(r0));
++    if (r0 >= n) {
++        throw std::runtime_error("forthllm: invalid BWT row index");
++    }
++    // LF mapping: LF(r) = C[L[r]] + Occ(L[r], r), where C[c] is the number of
++    // characters smaller than c and Occ counts c in L[0..r)
++    std::array<uint32_t, 256> count{};
++    for (char c : L) {
++        count[(uint8_t) c]++;
++    }
++    std::array<uint32_t, 256> C{};
++    uint32_t acc = 0;
++    for (int c = 0; c < 256; ++c) {
++        C[c] = acc;
++        acc += count[c];
++    }
++    std::vector<uint32_t> occ_before(n, 0);
++    std::array<uint32_t, 256> cnt{};
++    for (size_t r = 0; r < n; ++r) {
++        const uint8_t c = (uint8_t) L[r];
++        occ_before[r] = cnt[c];
++        cnt[c]++;
++    }
++    std::string out(n, '\0');
++    uint32_t r = r0;
++    for (size_t i = n; i-- > 0;) {
++        const uint8_t c = (uint8_t) L[r];
++        out[i] = (char) c;
++        r = C[c] + occ_before[r];
++    }
++    return out;
++}
+diff --git a/src/llama-context.cpp b/src/llama-context.cpp
+index 4141e3c9e..c6c7dc1c7 100644
+--- a/src/llama-context.cpp
++++ b/src/llama-context.cpp
+@@ -2,11 +2,14 @@
+ 
+ #include "ggml.h"
+ #include "llama-arch.h"
++#include "llama-forthllm.h"
+ #include "llama-graph.h"
+ #include "llama-impl.h"
+ #include "llama-batch.h"
+ #include "llama-io.h"
++#include "llama-kv-cache.h"
+ #include "llama-memory.h"
++#include "llama-memory-hybrid.h"
+ #include "llama-mmap.h"
+ #include "llama-model.h"
+ #include "llama-moe-cache.h"
+@@ -4547,6 +4550,59 @@ bool llama_memory_can_shift(llama_memory_t mem) {
+     return mem->get_can_shift();
+ }
+ 
++int llama_forthllm_compact(
++        struct llama_context * ctx,
++        int32_t seq_id,
++        const struct llama_forthllm_params * params,
++        struct llama_forthllm_chunk_range * chunk_info,
++        int32_t n_chunk_max) {
++    if (!ctx || !params) {
++        return -1;
++    }
++
++    if (chunk_info && n_chunk_max < 0) {
++        n_chunk_max = 0;
++    }
++
++    auto * memory = (llama_memory_i *) ctx->get_memory();
++    if (!memory) {
++        LLAMA_LOG_WARN("%s: no memory in the context\n", __func__);
++        return -1;
++    }
++
++    llama_kv_cache * kv = dynamic_cast<llama_kv_cache *>(memory);
++    llama_memory_recurrent * recr = nullptr;
++    if (!kv) {
++        // hybrid models (attention + recurrent layers) wrap the attention cache
++        auto * hybrid = dynamic_cast<llama_memory_hybrid *>(memory);
++        if (hybrid) {
++            kv   = hybrid->get_mem_attn();
++            recr = hybrid->get_mem_recr();
++        }
++    }
++    if (!kv) {
++        LLAMA_LOG_WARN("%s: not supported: the context memory does not expose a full-attention KV cache\n", __func__);
++        return -1;
++    }
++
++    std::vector<struct llama_forthllm_chunk_range> chunks;
++    const int n_freed = kv->forthllm_compact((llama_seq_id) seq_id, *params, chunks);
++
++    if (n_freed > 0 && recr) {
++        // keep the recurrent state's position bookkeeping in sync with the
++        // compacted attention cache (the running state itself is
++        // position-independent, only the pos field is shifted)
++        recr->seq_add((llama_seq_id) seq_id, 0, -1, -(llama_pos) n_freed);
++    }
++
++    if (chunk_info) {
++        const size_t n = std::min((size_t) n_chunk_max, chunks.size());
++        std::copy(chunks.begin(), chunks.begin() + n, chunk_info);
++    }
++
++    return n_freed;
++}
++
+ // llama state API
+ 
+ // deprecated
+diff --git a/src/llama-kv-cache.cpp b/src/llama-kv-cache.cpp
+index 00dbf7c94..614e2df01 100644
+--- a/src/llama-kv-cache.cpp
++++ b/src/llama-kv-cache.cpp
+@@ -1186,12 +1186,245 @@ bool llama_kv_cache::get_can_shift() const {
+     if (model.arch == LLM_ARCH_STEP35) {
+         return false;
+     }
+-    if (hparams.n_pos_per_embd() > 1) {
++    // IMROPE text carries the same 1D position in every non-zero section, so the
++    // K-shift (1D NEOX over n_rot, the same mechanism as --context-shift) re-rotates
++    // the stored keys correctly. True MROPE sections carry different positions
++    // (temporal/height/width), so a 1D shift is not valid there.
++    if (hparams.n_pos_per_embd() > 1 && hparams.rope_type != LLAMA_ROPE_TYPE_IMROPE) {
+         return false;
+     }
+     return true;
+ }
+ 
++// read one cache row (n elements, starting at the row's first element) into f32
++static bool forthllm_read_row(ggml_type type, const void * row, float * dst, int64_t n) {
++    if (type == GGML_TYPE_F32) {
++        std::memcpy(dst, row, (size_t) n * sizeof(float));
++        return true;
++    }
++    const auto * traits = ggml_get_type_traits(type);
++    if (traits && traits->to_float) {
++        traits->to_float(row, dst, n);
++        return true;
++    }
++    return false;
++}
++
++// write one f32 row into the cache (n elements, starting at the row's first element)
++static bool forthllm_write_row(ggml_type type, const float * src, void * row, int64_t n) {
++    if (type == GGML_TYPE_F32) {
++        std::memcpy(row, src, (size_t) n * sizeof(float));
++        return true;
++    }
++    const auto * traits = ggml_get_type_traits(type);
++    if (traits && traits->from_float_ref) {
++        traits->from_float_ref(src, row, n);
++        return true;
++    }
++    return false;
++}
++
++int llama_kv_cache::forthllm_compact(
++        llama_seq_id seq_id,
++        const struct llama_forthllm_params & params,
++        std::vector<struct llama_forthllm_chunk_range> & chunks) {
++    chunks.clear();
++
++    auto fail = [&](const char * msg) -> int {
++        LLAMA_LOG_WARN("%s: %s\n", __func__, msg);
++        return -1;
++    };
++
++    if (other) {
++        return fail("not supported: shared/mirrored KV cache");
++    }
++    if (swa_type != LLAMA_SWA_TYPE_NONE) {
++        return fail("not supported: sliding-window attention cache");
++    }
++    if (v_trans) {
++        return fail("not supported: transposed V cache (enable flash attention)");
++    }
++    if (!get_can_shift()) {
++        return fail("not supported: the cache does not support K-shift");
++    }
++    if (params.chunk_size <= 0 || params.summary_dim <= 0) {
++        return fail("invalid params: chunk_size and summary_dim must be > 0");
++    }
++    llama_forthllm_summary_method method;
++    try {
++        method = llama_forthllm_summary_method_from_str(params.summary_method ? params.summary_method : "attention");
++    } catch (const std::exception & e) {
++        return fail(e.what());
++    }
++    if (seq_id < 0 || (size_t) seq_id >= seq_to_stream.size()) {
++        return fail("invalid seq_id");
++    }
++
++    const uint32_t s = seq_to_stream[seq_id];
++    auto & cells = v_cells[s];
++    auto & head  = v_heads[s];
++
++    if (cells.get_used() == 0) {
++        return 0;
++    }
++
++    // the KV tensors must be host-resident (the rows are read/written directly)
++    for (const auto & layer : layers) {
++        if ((layer.k && !ggml_backend_buffer_is_host(layer.k->buffer)) ||
++            (layer.v && !ggml_backend_buffer_is_host(layer.v->buffer))) {
++            return fail("not supported: the KV cache must be on the host (offload the layers to the CPU)");
++        }
++    }
++
++    // collect the sequence's cells in position order
++    const llama_pos pos_min = cells.seq_pos_min(seq_id);
++    std::vector<uint32_t> idxs;
++    for (uint32_t i = cells.used_min(); i < cells.used_max_p1(); ++i) {
++        if (cells.seq_has(i, seq_id)) {
++            idxs.push_back(i);
++        }
++    }
++    std::sort(idxs.begin(), idxs.end(), [&](uint32_t a, uint32_t b) {
++        return cells.pos_get(a) < cells.pos_get(b);
++    });
++
++    const uint32_t C = (uint32_t) params.chunk_size;
++    const uint32_t S = std::min((uint32_t) params.summary_dim, C);
++
++    if (idxs.size() <= C) {
++        return 0; // the whole sequence fits in the raw window
++    }
++
++    // layout: keep the last C cells raw; compact the rest into full chunks of C
++    // (a leading remainder smaller than C stays raw)
++    const uint32_t n_compact = idxs.size() - C;
++    const uint32_t n_chunks  = n_compact / C;
++    const uint32_t n_skip    = n_compact % C;
++
++    int n_freed_total = 0;
++
++    for (uint32_t c = 0; c < n_chunks; ++c) {
++        const uint32_t i0 = n_skip + c * C;
++
++        // the chunk's cells must be contiguous in position space
++        llama_pos p0 = cells.pos_get(idxs[i0]);
++        bool ok = true;
++        for (uint32_t j = 0; j < C; ++j) {
++            if (cells.pos_get(idxs[i0 + j]) != p0 + (llama_pos) j) {
++                ok = false;
++                break;
++            }
++        }
++        // and exclusively owned by this sequence (shared cells cannot be freed)
++        if (ok) {
++            for (uint32_t j = 0; j < C; ++j) {
++                if (cells.seq_count(idxs[i0 + j]) != 1) {
++                    ok = false;
++                    break;
++                }
++            }
++        }
++        if (!ok) {
++            continue; // skip this chunk, keep it raw
++        }
++
++        // summarize the chunk's K/V rows into S rows, per layer
++        bool done = true;
++        for (auto & layer : layers) {
++            if (!layer.k || !layer.v) {
++                done = false;
++                break;
++            }
++
++            const uint32_t il = layer.il;
++            const uint32_t n_head_kv  = hparams.n_head_kv(il);
++            const uint32_t head_dim_k = hparams.n_embd_head_k(il);
++            const uint32_t head_dim_v = hparams.n_embd_head_v(il);
++            const uint32_t kv_dim_k   = n_head_kv * head_dim_k;
++            const uint32_t kv_dim_v   = n_head_kv * head_dim_v;
++
++            if (layer.k->ne[0] != (int64_t) kv_dim_k || layer.v->ne[0] < (int64_t) kv_dim_v) {
++                done = false;
++                break;
++            }
++
++            const auto * k = layer.k;
++            const auto * v = layer.v;
++
++            std::vector<float> kbuf((size_t) C * kv_dim_k);
++            std::vector<float> vbuf((size_t) C * kv_dim_v);
++            for (uint32_t j = 0; j < C; ++j) {
++                const uint32_t i = idxs[i0 + j];
++                const void * krow = (const char *) k->data + (size_t) i * k->nb[1] + (size_t) s * k->nb[2];
++                const void * vrow = (const char *) v->data + (size_t) i * v->nb[1] + (size_t) s * v->nb[2];
++                if (!forthllm_read_row(k->type, krow, &kbuf[(size_t) j * kv_dim_k], kv_dim_k) ||
++                    !forthllm_read_row(v->type, vrow, &vbuf[(size_t) j * kv_dim_v], kv_dim_v)) {
++                    done = false;
++                    break;
++                }
++            }
++            if (!done) {
++                break;
++            }
++
++            std::vector<float> ksum((size_t) S * kv_dim_k);
++            std::vector<float> vsum((size_t) S * kv_dim_v);
++            llama_forthllm_summarize(
++                    kbuf.data(), n_head_kv, head_dim_k,
++                    vbuf.data(), n_head_kv, head_dim_v,
++                    C, S, method, ksum, vsum);
++
++            for (uint32_t j = 0; j < S; ++j) {
++                const uint32_t i = idxs[i0 + j];
++                void * krow = (char *) k->data + (size_t) i * k->nb[1] + (size_t) s * k->nb[2];
++                void * vrow = (char *) v->data + (size_t) i * v->nb[1] + (size_t) s * v->nb[2];
++                if (!forthllm_write_row(k->type, &ksum[(size_t) j * kv_dim_k], krow, kv_dim_k) ||
++                    !forthllm_write_row(v->type, &vsum[(size_t) j * kv_dim_v], vrow, kv_dim_v)) {
++                    done = false;
++                    break;
++                }
++            }
++            if (!done) {
++                break;
++            }
++        }
++        if (!done) {
++            return fail("unsupported KV cache data type");
++        }
++
++        // free the cells beyond the S summary rows
++        for (uint32_t j = S; j < C; ++j) {
++            if (cells.seq_rm(idxs[i0 + j], seq_id) && idxs[i0 + j] < head) {
++                head = idxs[i0 + j];
++            }
++        }
++
++        // shift the subsequent cells left by (C - S); the K-shift mechanism
++        // re-rotates their keys to the new positions on the next update()
++        const llama_pos d = (llama_pos) S - (llama_pos) C;
++        for (uint32_t j = i0 + C; j < idxs.size(); ++j) {
++            cells.pos_add(idxs[j], d);
++        }
++
++        // report the chunk in the pre-compaction position space
++        chunks.push_back({
++            pos_min + (llama_pos) (n_skip + c * C),
++            (int32_t) C,
++            (int32_t) (C - S),
++        });
++
++        n_freed_total += (int) (C - S);
++    }
++
++    if (n_freed_total > 0) {
++        LLAMA_LOG_INFO("%s: seq %d: compacted %zu chunk(s), freed %d cells, %d -> %d positions\n",
++                __func__, (int) seq_id, chunks.size(), n_freed_total,
++                (int) idxs.size(), (int) (idxs.size() - (size_t) n_freed_total));
++    }
++
++    return n_freed_total;
++}
++
+ uint32_t llama_kv_cache::get_size() const {
+     const auto & cells = v_cells[seq_to_stream[0]];
+ 
+diff --git a/src/llama-kv-cache.h b/src/llama-kv-cache.h
+index 60d2e183c..b2d57711d 100644
+--- a/src/llama-kv-cache.h
++++ b/src/llama-kv-cache.h
+@@ -1,6 +1,7 @@
+ #pragma once
+ 
+ #include "llama-batch.h"
++#include "llama-forthllm.h"
+ #include "llama-graph.h"
+ #include "llama-kv-cells.h"
+ #include "llama-memory.h"
+@@ -172,6 +173,18 @@ public:
+     // The stream holding seq_id's cells.
+     uint32_t get_stream(llama_seq_id seq_id) const;
+ 
++    // ForthLLM: compact the KV cells of seq_id. Every old chunk of params.chunk_size
++    // tokens (the last chunk_size tokens are kept raw) is replaced by
++    // params.summary_dim summary rows, and the positions after each chunk are shifted
++    // left by (C - S) so the sequence stays contiguous. The keys of the shifted cells
++    // are re-rotated to their new positions by the K-shift mechanism on the next
++    // update(). Returns the number of freed cells, or a negative value if the cache
++    // configuration is not supported (a message is logged).
++    int forthllm_compact(
++            llama_seq_id seq_id,
++            const struct llama_forthllm_params & params,
++            std::vector<struct llama_forthllm_chunk_range> & chunks);
++
+     // state_read, plus the cells the restored tokens were placed in
+     // a cache that mirrors another one (the qwen4exp indexer) must not search for its own cells: two searches agree only by luck
+     //   sinfos_out: if set, filled with the layout used; a stream with no cells leaves an empty entry
+diff --git a/tests/CMakeLists.txt b/tests/CMakeLists.txt
+index 6a681afc6..8d8560ada 100644
+--- a/tests/CMakeLists.txt
++++ b/tests/CMakeLists.txt
+@@ -184,6 +184,7 @@ if (NOT WIN32 OR NOT BUILD_SHARED_LIBS)
+     llama_build_and_test(test-unicode.cpp  LABEL behavior  LINK llama)
+     llama_build_and_test(test-sampling.cpp  LABEL behavior  LINK llama)
+     llama_build_and_test(test-reasoning-budget.cpp  LABEL behavior)
++    llama_build_and_test(test-forthllm.cpp  LABEL behavior)
+     llama_build_and_test(test-grammar-parser.cpp  LABEL behavior  LINK llama)
+     llama_build_and_test(test-grammar-integration.cpp  LABEL behavior)
+     llama_build_and_test(test-llama-grammar.cpp  LABEL behavior  LINK llama)
+diff --git a/tests/test-forthllm.cpp b/tests/test-forthllm.cpp
+new file mode 100644
+index 000000000..254ea3da0
+--- /dev/null
++++ b/tests/test-forthllm.cpp
+@@ -0,0 +1,381 @@
++// ForthLLM: unit tests for the chunked context compression core
++// (summarization, stack eviction, squeezer, BWT). Deterministic, no model needed.
++
++#include "llama-forthllm.h"
++
++#include <cmath>
++#include <cstdio>
++#include <random>
++#include <stdexcept>
++
++static int n_fail = 0;
++
++#define CHECK(cond) \
++    do { \
++        if (!(cond)) { \
++            std::printf("FAIL %s:%d: %s\n", __FILE__, __LINE__, #cond); \
++            n_fail++; \
++        } \
++    } while (0)
++
++#define CHECK_THROWS(expr) \
++    do { \
++        bool threw = false; \
++        try { \
++            (void) (expr); \
++        } catch (const std::exception &) { \
++            threw = true; \
++        } \
++        if (!threw) { \
++            std::printf("FAIL %s:%d: expected throw: %s\n", __FILE__, __LINE__, #expr); \
++            n_fail++; \
++        } \
++    } while (0)
++
++static bool close_f(float a, float b, float eps = 1e-4f) {
++    return std::fabs(a - b) <= eps * std::max(1.0f, std::fabs(b));
++}
++
++static void fill_rows(std::vector<float> & rows, size_t n_rows, size_t dim, uint32_t seed) {
++    std::mt19937 gen(seed);
++    std::uniform_real_distribution<float> dist(-1.0f, 1.0f);
++    rows.resize(n_rows * dim);
++    for (auto & x : rows) {
++        x = dist(gen);
++    }
++}
++
++// independent reference: softmax over dot products of the rows with the last row
++static std::vector<float> ref_attention_weights(const std::vector<float> & k, size_t C, size_t head_dim) {
++    const float * q = &k[(C - 1) * head_dim];
++    std::vector<float> w(C);
++    float max_score = -INFINITY;
++    for (size_t i = 0; i < C; ++i) {
++        float dot = 0.0f;
++        for (size_t j = 0; j < head_dim; ++j) {
++            dot += k[i * head_dim + j] * q[j];
++        }
++        w[i] = dot / std::sqrt((float) head_dim);
++        max_score = std::max(max_score, w[i]);
++    }
++    float sum = 0.0f;
++    for (size_t i = 0; i < C; ++i) {
++        w[i] = std::exp(w[i] - max_score);
++        sum += w[i];
++    }
++    for (auto & x : w) {
++        x /= sum;
++    }
++    return w;
++}
++
++static void test_mean() {
++    std::printf("test_mean\n");
++    const size_t C = 8, S = 1, H = 2, D = 4;
++    const size_t kv_dim = H * D;
++    std::vector<float> k, v;
++    fill_rows(k, C, kv_dim, 1);
++    fill_rows(v, C, kv_dim, 2);
++
++    std::vector<float> ko, vo;
++    llama_forthllm_summarize(k.data(), H, D, v.data(), H, D, C, S, LLAMA_FORTHLLM_SUMMARY_MEAN, ko, vo);
++    CHECK(ko.size() == S * kv_dim);
++    CHECK(vo.size() == S * kv_dim);
++    for (size_t j = 0; j < kv_dim; ++j) {
++        float mk = 0.0f, mv = 0.0f;
++        for (size_t i = 0; i < C; ++i) {
++            mk += k[i * kv_dim + j];
++            mv += v[i * kv_dim + j];
++        }
++        CHECK(close_f(ko[j], mk / (float) C));
++        CHECK(close_f(vo[j], mv / (float) C));
++    }
++
++    // S = 2: two sub-chunks, each the mean of its half
++    std::vector<float> ko2, vo2;
++    llama_forthllm_summarize(k.data(), H, D, v.data(), H, D, C, 2, LLAMA_FORTHLLM_SUMMARY_MEAN, ko2, vo2);
++    CHECK(ko2.size() == 2 * kv_dim);
++    for (size_t s = 0; s < 2; ++s) {
++        const size_t i0 = (s * C) / 2, i1 = ((s + 1) * C) / 2;
++        for (size_t j = 0; j < kv_dim; ++j) {
++            float mk = 0.0f;
++            for (size_t i = i0; i < i1; ++i) {
++                mk += k[i * kv_dim + j];
++            }
++            CHECK(close_f(ko2[s * kv_dim + j], mk / (float) (i1 - i0)));
++        }
++    }
++}
++
++static void test_last() {
++    std::printf("test_last\n");
++    const size_t C = 8, S = 3, H = 1, D = 4;
++    const size_t kv_dim = H * D;
++    std::vector<float> k, v;
++    fill_rows(k, C, kv_dim, 3);
++    fill_rows(v, C, kv_dim, 4);
++
++    std::vector<float> ko, vo;
++    llama_forthllm_summarize(k.data(), H, D, v.data(), H, D, C, S, LLAMA_FORTHLLM_SUMMARY_LAST, ko, vo);
++    for (size_t s = 0; s < S; ++s) {
++        const size_t i = C - S + s;
++        for (size_t j = 0; j < kv_dim; ++j) {
++            CHECK(ko[s * kv_dim + j] == k[i * kv_dim + j]);
++            CHECK(vo[s * kv_dim + j] == v[i * kv_dim + j]);
++        }
++    }
++
++    // S clamped to C
++    std::vector<float> ko_big, vo_big;
++    llama_forthllm_summarize(k.data(), H, D, v.data(), H, D, C, C + 5, LLAMA_FORTHLLM_SUMMARY_LAST, ko_big, vo_big);
++    CHECK(ko_big.size() == C * kv_dim);
++}
++
++static void test_attention() {
++    std::printf("test_attention\n");
++    // identical keys -> uniform weights -> the mean
++    {
++        const size_t C = 5, H = 1, D = 3;
++        const size_t kv_dim = H * D;
++        std::vector<float> k(C * kv_dim, 0.0f), v;
++        fill_rows(v, C, kv_dim, 5);
++        for (size_t i = 0; i < C; ++i) {
++            k[i * kv_dim] = 1.0f;
++        }
++        std::vector<float> ko, vo;
++        llama_forthllm_summarize(k.data(), H, D, v.data(), H, D, C, 1, LLAMA_FORTHLLM_SUMMARY_ATTENTION, ko, vo);
++        for (size_t j = 0; j < kv_dim; ++j) {
++            float mv = 0.0f;
++            for (size_t i = 0; i < C; ++i) {
++                mv += v[i * kv_dim + j];
++            }
++            CHECK(close_f(vo[j], mv / (float) C));
++        }
++    }
++    // one head, controlled keys: verify against the reference softmax
++    {
++        const size_t C = 4, H = 1, D = 2;
++        const size_t kv_dim = H * D;
++        std::vector<float> k = {
++             1.0f, 0.0f,  // row 0: parallel to the last key
++             0.0f, 1.0f,  // row 1
++             0.0f, 1.0f,  // row 2
++             1.0f, 0.0f,  // row 3 (last)
++        };
++        std::vector<float> v = {
++            10.0f,  0.0f,
++             0.0f, 10.0f,
++             0.0f, 10.0f,
++            10.0f,  0.0f,
++        };
++        std::vector<float> ko, vo;
++        llama_forthllm_summarize(k.data(), H, D, v.data(), H, D, C, 1, LLAMA_FORTHLLM_SUMMARY_ATTENTION, ko, vo);
++        const std::vector<float> w = ref_attention_weights(k, C, D);
++        float mk = 0.0f, mv = 0.0f;
++        for (size_t i = 0; i < C; ++i) {
++            mk += w[i] * k[i * kv_dim];
++            mv += w[i] * v[i * kv_dim];
++        }
++        CHECK(close_f(ko[0], mk, 1e-3f));
++        CHECK(close_f(ko[1], (w[1] + w[2]) * 1.0f, 1e-3f)); // rows 1,2 carry the second component
++        CHECK(close_f(vo[0], mv, 1e-3f));
++        CHECK(close_f(vo[1], 10.0f * (w[1] + w[2]), 1e-3f));
++        // the parallel rows must dominate
++        CHECK(w[0] > w[1] && w[3] > w[1]);
++    }
++    // per-head independence: head 0 has distinct keys, head 1 identical keys
++    {
++        const size_t C = 3, H = 2, D = 2;
++        // row layout: [h0d0 h0d1 h1d0 h1d1]
++        std::vector<float> k = {
++             1.0f, 0.0f,  1.0f, 1.0f,  // row 0
++             0.0f, 1.0f,  1.0f, 1.0f,  // row 1
++             1.0f, 0.0f,  1.0f, 1.0f,  // row 2 (last)
++        };
++        std::vector<float> v = {
++            1.0f, 0.0f,  1.0f, 0.0f,
++            0.0f, 1.0f,  0.0f, 1.0f,
++            1.0f, 0.0f,  1.0f, 0.0f,
++        };
++        std::vector<float> ko, vo;
++        llama_forthllm_summarize(k.data(), H, D, v.data(), H, D, C, 1, LLAMA_FORTHLLM_SUMMARY_ATTENTION, ko, vo);
++        // head 0: keys [1,0],[0,1],[1,0], last = [1,0]; scores: 1/sqrt2, 0, 1/sqrt2
++        // head 1: all keys identical [1,1] -> uniform weights -> mean of head-1 V rows [1,0],[0,1],[1,0]
++        CHECK(close_f(vo[2], 2.0f / 3.0f, 1e-3f));
++        CHECK(close_f(vo[3], 1.0f / 3.0f, 1e-3f));
++        // head 0 summary must NOT equal the mean of head-0 V rows ([2/3, 2/3])
++        CHECK(!close_f(vo[0], 2.0f / 3.0f, 1e-3f));
++    }
++}
++
++static void test_bwt() {
++    std::printf("test_bwt\n");
++    {
++        const std::string s = "banana";
++        CHECK(llama_forthllm_bwt_invert(llama_forthllm_bwt_transform(s)) == s);
++    }
++    {
++        // zero bytes and a rare byte
++        std::string z(32, '\0');
++        z[5] = 'x';
++        CHECK(llama_forthllm_bwt_invert(llama_forthllm_bwt_transform(z)) == z);
++    }
++    {
++        // all 256 byte values (no unique sentinel possible)
++        std::string r;
++        for (int i = 0; i < 257; ++i) {
++            r += (char) (i % 251);
++        }
++        CHECK(llama_forthllm_bwt_invert(llama_forthllm_bwt_transform(r)) == r);
++    }
++    {
++        // random bytes
++        std::mt19937 gen(99);
++        std::uniform_int_distribution<int> dist(0, 255);
++        std::string r;
++        for (int i = 0; i < 512; ++i) {
++            r += (char) dist(gen);
++        }
++        CHECK(llama_forthllm_bwt_invert(llama_forthllm_bwt_transform(r)) == r);
++    }
++    CHECK(llama_forthllm_bwt_transform("").empty());
++    CHECK_THROWS(llama_forthllm_bwt_invert("ab")); // too short
++}
++
++static void test_squeezer() {
++    std::printf("test_squeezer\n");
++    llama_forthllm_squeezer sq(16, 42);
++    CHECK(sq.output_dim() == 16);
++
++    std::vector<float> x(32);
++    fill_rows(x, 1, 32, 7);
++
++    const std::string c = sq.squeeze(x);
++    // deterministic
++    CHECK(sq.squeeze(x) == c);
++
++    const std::vector<float> y = sq.expand(c);
++    CHECK(y.size() == 16);
++
++    // expand() == project(x) within the 8-bit quantization error
++    const std::vector<float> p = sq.project(x);
++    float lo = p.front(), hi = p.front();
++    for (float t : p) {
++        lo = std::min(lo, t);
++        hi = std::max(hi, t);
++    }
++    const float qerr = (hi - lo) / 255.0f + 1e-6f;
++    for (size_t i = 0; i < p.size(); ++i) {
++        CHECK(std::fabs(y[i] - p[i]) <= qerr);
++    }
++
++    // different seed -> different (but still valid) compression
++    llama_forthllm_squeezer sq2(16, 43);
++    CHECK(sq2.squeeze(x) != c);
++    CHECK(sq2.expand(sq2.squeeze(x)).size() == 16);
++
++    CHECK_THROWS(sq.expand("short"));
++}
++
++static void test_stack() {
++    std::printf("test_stack\n");
++    // fixed-window: keep the most recent max_stack_depth chunks
++    {
++        llama_forthllm_config cfg;
++        cfg.max_stack_depth = 3;
++        cfg.eviction = "fixed-window";
++        llama_forthllm_stack st(cfg);
++        for (size_t i = 0; i < 5; ++i) {
++            st.push({i, 128, 1, 1.0f});
++        }
++        CHECK(st.size() == 5);
++        auto drop = st.evict();
++        CHECK(drop.size() == 2);
++        CHECK(drop[0] == 0 && drop[1] == 1);
++        CHECK(st.size() == 3);
++        CHECK(st.at(0).chunk_id == 2);
++        // nothing more to drop
++        CHECK(st.evict().empty());
++    }
++    // lru: least importance first, ties broken by oldest
++    {
++        llama_forthllm_config cfg;
++        cfg.max_stack_depth = 2;
++        cfg.eviction = "lru";
++        llama_forthllm_stack st(cfg);
++        st.push({0, 128, 1, 0.9f});
++        st.push({1, 128, 1, 0.5f});
++        st.push({2, 128, 1, 0.1f});
++        st.push({3, 128, 1, 0.7f});
++        auto drop = st.evict();
++        CHECK(drop.size() == 2);
++        CHECK(drop[0] == 2); // lowest importance
++        CHECK(drop[1] == 1); // next lowest
++        CHECK(st.size() == 2);
++        CHECK(st.at(0).chunk_id == 0);
++        CHECK(st.at(1).chunk_id == 3);
++    }
++    // within capacity: nothing dropped
++    {
++        llama_forthllm_config cfg;
++        cfg.max_stack_depth = 10;
++        llama_forthllm_stack st(cfg);
++        for (size_t i = 0; i < 4; ++i) {
++            st.push({i, 64, 1, 1.0f});
++        }
++        CHECK(st.evict().empty());
++    }
++}
++
++static void test_config() {
++    std::printf("test_config\n");
++    {
++        llama_forthllm_config cfg;
++        cfg.validate(); // defaults are valid
++    }
++    {
++        llama_forthllm_config cfg;
++        cfg.summary_dim = cfg.chunk_size + 1;
++        CHECK_THROWS(cfg.validate());
++    }
++    {
++        llama_forthllm_config cfg;
++        cfg.chunk_size = 0;
++        CHECK_THROWS(cfg.validate());
++    }
++    {
++        llama_forthllm_config cfg;
++        cfg.summary_method = "bogus";
++        CHECK_THROWS(cfg.validate());
++    }
++    {
++        llama_forthllm_config cfg;
++        cfg.eviction = "bogus";
++        CHECK_THROWS(cfg.validate());
++    }
++    {
++        llama_forthllm_config cfg;
++        cfg.squeezer = "jl-bwt";
++        cfg.jl_dim = 0;
++        CHECK_THROWS(cfg.validate());
++    }
++    CHECK(std::string(llama_forthllm_summary_method_name(llama_forthllm_summary_method_from_str("ATTENTION"))) == "attention");
++    CHECK_THROWS(llama_forthllm_summary_method_from_str("bogus"));
++}
++
++int main() {
++    test_mean();
++    test_last();
++    test_attention();
++    test_bwt();
++    test_squeezer();
++    test_stack();
++    test_config();
++
++    if (n_fail) {
++        std::printf("%d ForthLLM test failure(s)\n", n_fail);
++        return 1;
++    }
++    std::printf("All ForthLLM tests passed\n");
++    return 0;
++}
+diff --git a/tools/server/server-context.cpp b/tools/server/server-context.cpp
+index 9377e3c17..d43f5f608 100644
+--- a/tools/server/server-context.cpp
++++ b/tools/server/server-context.cpp
+@@ -2186,12 +2186,23 @@ private:
+ 
+         // if context shifting is disabled, make sure that we don't run out of context
+         if (!params_base.ctx_shift && slot.prompt.n_tokens() + 1 >= slot.n_ctx) {
+-            slot.truncated      = true;
+-            slot.stop           = STOP_TYPE_LIMIT;
+-            slot.has_next_token = false;
++            bool can_continue = false;
++
++            // ForthLLM: before stopping, try compressing the oldest chunks into
++            // summary rows (frees cells without dropping the content entirely); if
++            // nothing could be compacted, stop as before
++            if (params_base.forthllm.enabled && !slot.prompt.tokens.has_mtmd && !slot.can_speculate()) {
++                can_continue = forthllm_compact_slot(slot) > 0;
++            }
++
++            if (!can_continue) {
++                slot.truncated      = true;
++                slot.stop           = STOP_TYPE_LIMIT;
++                slot.has_next_token = false;
+ 
+-            SLT_DBG(slot, "stopped due to running out of context capacity, prompt.n_tokens() = %d, task.n_tokens = %d, n_gen = %d, n_ctx = %d\n",
+-                    slot.prompt.n_tokens(), slot.task->n_tokens(), (int) slot.stats.n_gen, slot.n_ctx);
++                SLT_DBG(slot, "stopped due to running out of context capacity, prompt.n_tokens() = %d, task.n_tokens = %d, n_gen = %d, n_ctx = %d\n",
++                        slot.prompt.n_tokens(), slot.task->n_tokens(), (int) slot.stats.n_gen, slot.n_ctx);
++            }
+         }
+ 
+         // check the limits
+@@ -3758,6 +3769,52 @@ private:
+         });
+     }
+ 
++    // ForthLLM: compact the slot's KV cache (old chunks -> summary rows) and keep
++    // slot.prompt.tokens in sync with the compacted positions.
++    // Returns the number of freed cells, 0 if nothing was compacted, or a negative
++    // value on error. Only valid for text-only prompts (token index == position).
++    int forthllm_compact_slot(server_slot & slot) {
++        const int32_t C = params_base.forthllm.chunk_size;
++        const int32_t S = std::min(params_base.forthllm.summary_dim, C);
++        if (C <= 0 || S <= 0 || S >= C) {
++            return -1;
++        }
++
++        // one entry per compacted chunk (at most one chunk per C tokens)
++        std::vector<llama_forthllm_chunk_range> chunks(slot.prompt.tokens.size() / (size_t) C + 1);
++
++        const int n_freed = common_forthllm_compact(slot.ctx_tgt, slot.id, params_base.forthllm, chunks.data(), (int32_t) chunks.size());
++        if (n_freed <= 0) {
++            return n_freed;
++        }
++
++        // each compacted chunk frees exactly (C - S) cells, reported in order
++        const int32_t n_chunks = n_freed / (C - S);
++
++        // remove the compacted tokens from the prompt (back-to-front, so the earlier
++        // ranges keep their indices); the summary rows occupy the first S tokens of
++        // each chunk, so those stay
++        llama_tokens new_tokens = slot.prompt.tokens.get_tokens(); // copy
++        for (int32_t i = n_chunks - 1; i >= 0; --i) {
++            const auto & cr = chunks[i];
++            const size_t begin = (size_t) cr.pos0 + (size_t) S;
++            const size_t end   = (size_t) cr.pos0 + (size_t) cr.n_tokens;
++            if (begin < new_tokens.size() && end <= new_tokens.size()) {
++                new_tokens.erase(new_tokens.begin() + begin, new_tokens.begin() + end);
++            }
++        }
++
++        slot.prompt.clear();
++        slot.prompt.tokens.insert(new_tokens);
++
++        slot.truncated = true;
++
++        SLT_INF(slot, "forthllm: compacted %d chunk(s), freed %d cells, prompt %d -> %d tokens\n",
++                n_chunks, n_freed, (int) (new_tokens.size() + (size_t) n_freed), (int) new_tokens.size());
++
++        return n_freed;
++    }
++
+     void pre_decode() {
+         // apply context-shift if needed
+         // TODO: simplify and improve
+@@ -3767,6 +3824,14 @@ private:
+                 return;
+             }
+             if (slot.state == SLOT_STATE_GENERATING && slot.prompt.n_tokens() + 1 >= slot.n_ctx) {
++                // ForthLLM: before shifting the context, try compressing the oldest
++                // chunks into summary rows (frees cells without dropping the content
++                // entirely); if nothing could be compacted, fall through to the shift
++                if (params_base.forthllm.enabled && !slot.prompt.tokens.has_mtmd && !slot.can_speculate()) {
++                    if (forthllm_compact_slot(slot) > 0) {
++                        return; // the slot continues; the condition is re-checked next iteration
++                    }
++                }
+                 if (!params_base.ctx_shift) {
+                     // this check is redundant (for good)
+                     // we should never get here, because generation should already stopped in process_token()
+@@ -4853,6 +4918,20 @@ private:
+ 
+                 GGML_ASSERT(slot.task->need_sampling());
+ 
++                // ForthLLM: compact the prefilled prompt (old chunks -> summary rows)
++                // so the KV cache stops growing linearly with the prompt length.
++                // n_predict_max == 0 means nothing will be generated, so the pending
++                // K-shift would never be applied before the prompt is cached.
++                if (params_base.forthllm.enabled &&
++                    !slot.prompt.tokens.has_mtmd &&
++                    !slot.can_speculate() &&
++                    slot.n_predict_max != 0) {
++                    const int n_freed = forthllm_compact_slot(slot);
++                    if (n_freed < 0) {
++                        SLT_WRN(slot, "forthllm: compaction failed (ret = %d), continuing without it\n", n_freed);
++                    }
++                }
++
+                 // prompt evaluated for next-token prediction
+                 slot.state = SLOT_STATE_GENERATING;
+ 

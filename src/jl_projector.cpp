@@ -1,6 +1,7 @@
 #include "forthllm/squeezer.h"
 #include <cmath>
 #include <random>
+#include <stdexcept>
 
 namespace forthllm {
 

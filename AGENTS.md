@@ -43,9 +43,12 @@ contiguous blocks. When the operator's window covers the model, the whole model 
 once and re-faults drop to zero (28 G window: faults=7683, 12.8 t/s vs 2.3 t/s at the
 3 GiB window). The host buffer (`LLAMA_VM`) still must hold the whole model in RAM, but it
 now rejects an operator budget (`LLAMA_VM_RAM`) below the model size instead of silently
-malloc'ing it. The budgets are exposed as llama-server/llama-cli flags
-(`--llama-vm-ram`, `--llama-vm-vram`, `--llama-vm-swap`, `--llama-vm-gguf`), which
-`common_params_parse` maps onto the `LLAMA_VM_*` env vars (a flag overrides the env var).
+malloc'ing it. The budgets are read by the buffers from the `LLAMA_VM_*` env vars
+(`LLAMA_VM_RAM`, `LLAMA_VM_VRAM`, `LLAMA_VM_SWAP`, `LLAMA_VM_GGUF`). Note (verified
+2026-10-30): the `--llama-vm-*` CLI flags are **not** present in the current llama.cpp
+build (`/work/llama.cpp`, clean upstream) — passing them fails with
+`error: invalid argument`; set the env vars instead. See
+`llama-server-forthllm-investigation.md`.
 **The objective is not yet met**: model > RAM (CPU) still relies on the OS page cache.
 See *Next steps*.
 
@@ -68,7 +71,21 @@ tests/                        test_arena, test_pager, test_concurrent, test_ggml
                                  test_captured, test_gpu_buffer, test_llama_integration,
                                  test_gguf, test_vram (ctest)
 tools/llama-vm.cpp            CLI: info / verify / bench / pages / plan / tiered / demo
+include/forthllm/, src/forthllm.cpp, src/squeezer.cpp, src/bwt.cpp, src/fm_index.cpp,
+                                src/jl_projector.cpp   ForthLLM scaffold (PLACEHOLDER —
+                                summaries are sin() values, no model access; the real
+                                engine now lives in llama.cpp, see below)
 design.md, planning.md        original design and roadmap
+forthllm-design.md            ForthLLM design (examples are aspirational — the flag
+                                set is implemented in llama.cpp but the stored-
+                                representation options are not; see status note)
+llama-server-forthllm-investigation.md
+                              2026-10-30 investigation: --llama-vm-*/--forthllm-* flag
+                                failure, mechanism, and the ForthLLM implementation
+                                (Phases 1-3 done, validated on Qwen3.8-27B)
+patches/llama-cpp-forthllm-kv-compaction.patch
+                              the ForthLLM llama.cpp feature patch (flags + engine +
+                                KV-cache compaction + server hooks), validated E2E
 ```
 
 ## Architecture
@@ -384,11 +401,12 @@ Measured on a 28 GB Qwen3.6-27B Q8_0 (model on the page cache):
    (llama.cpp / MTP side), and the file-mode load phase (the loader still reads the whole
    model out of the GGUF and the buffer discards it — a llama.cpp hook to skip
    `set_tensor` for bufts that ignore writes would save one full model read per load).
-2. **User-dictated RAM+VRAM budget in the llama.cpp path.** The budgets are exposed as
-   llama-server/llama-cli flags (`--llama-vm-ram`, `--llama-vm-vram`, `--llama-vm-swap`,
-   `--llama-vm-gguf`), which `common_params_parse` maps onto the `LLAMA_VM_*` env vars (a
-   flag overrides the env var; the host buffer rejects a sub-model budget, the GPU buffer
-   pages at the budget). Size the tiers via `plan_capacity`.
+2. **User-dictated RAM+VRAM budget in the llama.cpp path.** The budgets are read from
+   the `LLAMA_VM_*` env vars (`LLAMA_VM_RAM`, `LLAMA_VM_VRAM`, `LLAMA_VM_SWAP`,
+   `LLAMA_VM_GGUF`); the host buffer rejects a sub-model budget, the GPU buffer pages at
+   the budget. The `--llama-vm-*` CLI flags are **not** in the current llama.cpp build —
+   either add them to `common_params_parse` (map onto the env vars, flag overrides env)
+   or keep using env vars. Size the tiers via `plan_capacity`.
 3. **CPU constraint (why the GPU path is primary).** A *host* buffer must hold the whole
    model in RAM: the CPU reads weights via a direct `tensor->data` host pointer
    (`ggml/src/ggml-cpu/ggml-cpu.c`, e.g. MUL_MAT reads `src1->data`), and the CPU backend
@@ -407,6 +425,16 @@ Measured on a 28 GB Qwen3.6-27B Q8_0 (model on the page cache):
 6. **Swap hardening** — crash recovery (validity bitmap + `fdatasync`) is implemented;
    still handle disk-full on write-back gracefully (currently throws).
 7. **MLX backend** — in progress (see `planning.md`).
+8. **ForthLLM** — Phases 1–3 are done in llama.cpp (the
+   `--forthllm-*` flags, the summarization engine, `llama_kv_cache::forthllm_compact`
+   incl. hybrid/IMROPE support, and the server's post-prefill, context-limit-stop,
+   and pre-context-shift hooks); validated end-to-end on Qwen3.8-27B (2196-token
+   prompt → 180 cells, coherent answer). The patch is `patches/llama-cpp-forthllm-kv-compaction.patch`.
+   Remaining (Phase 4): replace this repo's `include/forthllm/` + `src/forthllm.cpp`
+   placeholder scaffold with the real engine (or a thin re-export), wire the
+   stored-representation options (`max_stack_depth`/`eviction`/`squeezer`) into the
+   cache path, and add MLA (DeepSeek-V4) support. See
+   `llama-server-forthllm-investigation.md`.
 
 Done since the last revision: concurrency stress test (`test_concurrent`), swap
 crash-recovery (`fdatasync` + validity bitmap), host-region support, the ggml buffer
@@ -437,6 +465,28 @@ backend registry and can be selected via `LLAMA_VM_GPU=mlx`. The pager's VRAM ti
 now supports MLX as a backend option, enabling demand-paged model execution on
 Apple Silicon with MLX as the compute backend. See MLX_BACKEND.md and NEXT_STEPS.md
 for details.
+
+**ForthLLM** (context/KV compression — implemented in llama.cpp, 2026-10-30): the
+`--forthllm-*` llama-server flags now parse (`common/arg.cpp`), and the real engine —
+chunked KV-row summarization (mean/last/attention, per-head weights), `llama_kv_cache::
+forthllm_compact` (compacts old chunks of a full-attention KV cache into S summary
+rows, re-rotating shifted keys via the K-shift graph; bare and hybrid
+attention+recurrent memories, incl. IMROPE text), plus the server's post-prefill,
+context-limit-stop, and pre-context-shift hooks — lives in the llama core
+(`include/llama-forthllm.h`,
+`src/forthllm.cpp`, C API `llama_forthllm_compact`). Validated end-to-end on
+Qwen3.8-27B (qwen35, hybrid, IMROPE): a 2196-token prompt compacted to 180 cells
+(16 chunks, 2016 freed) with a correct, coherent answer. Patch:
+`patches/llama-cpp-forthllm-kv-compaction.patch`. **MVP limitations**: MLA caches
+(DeepSeek-V4 — the user's model), `hybrid_iswa`/`hybrid_idx`, speculative slots, and
+the stored-representation options (`max_stack_depth`/`eviction`/`squeezer`, parsed but
+not yet used by the cache path). This repo's `include/forthllm/` + `src/forthllm.cpp`
+(+ `squeezer`, `bwt`, `fm_index`, `jl_projector`) scaffold is still a placeholder
+(`process_chunk()` fills summaries with `sin(i + chunk_id) * 0.1f`, never touches the
+model) — Phase 4 replaces it. (The `--llama-vm-*` flags are likewise absent from the
+current build — budgets go through the `LLAMA_VM_*` env vars.) The full assessment,
+the llama.cpp KV-cache API survey, and the phased implementation are in
+`llama-server-forthllm-investigation.md`.
 
 ## Debugging notes
 - **A "stalled" llama-cli is usually the stdin-EOF prompt loop, not the GPU.** After

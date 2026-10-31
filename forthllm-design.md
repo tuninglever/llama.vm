@@ -1,5 +1,25 @@
 # ForthLLM: Stack-like Context Processing for LLMs
 
+> **Status (2026-10-30): the `--forthllm-*` flags are implemented in llama.cpp**
+> (Phases 1–3: flag parsing, the chunked KV-row summarization engine, and
+> `llama_kv_cache::forthllm_compact` with the server's post-prefill + context-pressure
+> hooks), validated end-to-end on Qwen3.8-27B. Patch:
+> `patches/llama-cpp-forthllm-kv-compaction.patch`.
+>
+> Still **aspirational** in the *Examples* below: the stored-representation options
+> (`--forthllm-max-stack-depth`, `--forthllm-eviction`, `--forthllm-squeezer`,
+> `--forthllm-jl-dim`) parse and validate but are not yet used by the cache path, and
+> MLA models (DeepSeek-V4) are a documented "not supported" compaction path. The
+> library in `include/forthllm/` + `src/forthllm.cpp` in *this repo* is still a
+> placeholder (`process_chunk()` fills "summaries" with
+> `sin(i + chunk_id) * 0.1f`, never touches the model) — Phase 4 replaces it with the
+> real engine. The full assessment and the implementation are in
+> `llama-server-forthllm-investigation.md`.
+>
+> Also note: the `--llama-vm-ram/--llama-vm-vram/...` flags shown in the examples are
+> not in the current llama.cpp build either — set the `LLAMA_VM_*` env vars instead
+> (see `AGENTS.md`).
+
 ## Origin of the Idea
 
 The idea emerged from considering how Forth's stack-based computation model could apply to LLM prompt processing. In Forth:
@@ -107,6 +127,11 @@ This approach aligns with several active research directions:
 The trade-off is between memory/latency efficiency and expressiveness. For many practical tasks (conversation, code completion, summarization), stack-like processing may be sufficient.
 
 ## Examples: Running Large LLMs with llama-server
+
+> ⚠️ **Not runnable (2026-10-30).** These commands use `--llama-vm-*` and
+> `--forthllm-*` flags that are not implemented in any llama.cpp build. Today: budgets
+> go through the `LLAMA_VM_*` env vars, and ForthLLM is not wired into the server.
+> See the status note at the top of this file.
 
 ### Example 1: Basic ForthLLM Usage
 
