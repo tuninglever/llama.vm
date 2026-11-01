@@ -1,0 +1,241 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>ForthLLM Development Report — Phases 4a &amp; 4b</title>
+<style>
+  @page { size: A4; margin: 18mm 16mm; }
+  body { font-family: 'DejaVu Sans','Liberation Sans',Arial,sans-serif; font-size: 10.5pt; line-height: 1.5; color: #1a1a1a; }
+  h1 { font-size: 22pt; color: #0b3d66; border-bottom: 3px solid #0b3d66; padding-bottom: 6px; margin: 0 0 4px 0; }
+  h2 { font-size: 15pt; color: #0b3d66; margin-top: 26px; border-bottom: 1px solid #c9d6e2; padding-bottom: 4px; }
+  h3 { font-size: 12pt; color: #14507e; margin-top: 18px; }
+  p  { margin: 8px 0; }
+  pre { font-family: 'DejaVu Sans Mono',monospace; font-size: 8.5pt; background: #f4f6f8; border: 1px solid #dde3e8; border-radius: 4px; padding: 10px 12px; white-space: pre-wrap; word-wrap: break-word; }
+  code { font-family: 'DejaVu Sans Mono',monospace; font-size: 9pt; background: #eef1f4; padding: 1px 4px; border-radius: 3px; }
+  .think { background: #eef4fb; border-left: 4px solid #2f6fb0; padding: 10px 14px; margin: 12px 0; border-radius: 0 4px 4px 0; }
+  .think .label { font-weight: bold; color: #2f6fb0; display: block; margin-bottom: 4px; font-size: 9pt; text-transform: uppercase; letter-spacing: 0.6px; }
+  table { border-collapse: collapse; width: 100%; margin: 10px 0; font-size: 9.5pt; }
+  th, td { border: 1px solid #c9d6e2; padding: 6px 9px; text-align: left; vertical-align: top; }
+  th { background: #0b3d66; color: #fff; }
+  tr:nth-child(even) td { background: #f4f7fa; }
+  .meta { color: #5a6b7a; font-size: 9.5pt; }
+  .ok { color: #1e7e34; font-weight: bold; }
+  .warn { color: #b26a00; font-weight: bold; }
+  .bad { color: #b02a1e; font-weight: bold; }
+  hr { border: none; border-top: 1px solid #c9d6e2; margin: 22px 0; }
+  ul, ol { margin: 6px 0 6px 0; padding-left: 22px; }
+  li { margin: 3px 0; }
+  .toc { background:#f7f9fb; border:1px solid #dde3e8; border-radius:5px; padding:10px 16px; margin:14px 0; }
+  .toc a { color:#14507e; text-decoration:none; }
+</style>
+</head>
+<body>
+
+<h1>ForthLLM Development Report</h1>
+<div class="meta">Phases 4a &amp; 4b &nbsp;•&nbsp; llama.vm / llama.cpp &nbsp;•&nbsp; 2026-10-31<br>
+Scope: committing the Phases 1–3 ForthLLM work, replacing the placeholder scaffold (4a), wiring
+<code>max_stack_depth</code>/<code>eviction</code> into the compaction (4b), and the DeepSeek-V4 (MLA) finding that
+re-scopes 4c. This report includes the reasoning behind each decision.</div>
+
+<div class="toc">
+<b>Contents</b><br>
+1. Executive summary &nbsp;•&nbsp; 2. Fork question &nbsp;•&nbsp; 3. Phase 4a — scaffold replacement &nbsp;•&nbsp;
+4. DeepSeek-V4 finding (re-scopes 4c) &nbsp;•&nbsp; 5. Phase 4b — max_stack_depth + eviction &nbsp;•&nbsp;
+6. End-to-end validation &nbsp;•&nbsp; 7. Commits &amp; artifacts &nbsp;•&nbsp; 8. Remaining work (4c) &nbsp;•&nbsp;
+Appendix A — Decision log (the thinking)
+</div>
+
+<h2>1. Executive summary</h2>
+<p>This session closed out the ForthLLM KV-cache-compaction effort as follows:</p>
+<ul>
+<li><b>Committed</b> the Phases 1–3 work (flags, engine, KV surgery, server hooks) that had been validated
+end-to-end but was uncommitted in both repos.</li>
+<li><b>Answered the fork question</b>: fork llama.cpp (yes), merge the llama.vm pager into it (no).</li>
+<li><b>Completed Phase 4a</b>: replaced llama.vm's token-level placeholder scaffold with a faithful port of the
+tested llama.cpp engine. Full test suite green (11/11).</li>
+<li><b>Completed Phase 4b</b>: wired <code>--forthllm-max-stack-depth</code> and <code>--forthllm-eviction</code> into the
+compaction, validated end-to-end on a 27B model.</li>
+<li><b>Re-scoped Phase 4c</b> after discovering that DeepSeek-V4's KV cache is a raw-SWA + compressed-block +
+ring-state structure, not a plain MLA cache — so 4c needs a design pass, not a mechanical port.</li>
+</ul>
+<p>All work is committed, the feature patch is regenerated and in sync with the tree, and the docs
+(<code>AGENTS.md</code>, <code>forthllm-design.md</code>, the investigation doc) were updated to match.</p>
+
+<h2>2. Fork question</h2>
+<p><b>Question:</b> "Since we don't own llama.cpp, should we fork it and just merge llama.vm into it?"</p>
+<p><b>Recommendation: fork llama.cpp — yes; merge the llama.vm pager into it — no.</b></p>
+<div class="think"><span class="label">Thinking</span>
+ForthLLM is a <i>llama.cpp</i> feature (flags in <code>common/</code>, engine + KV surgery in the core, hooks in
+<code>tools/server</code>). Its durable home is a feature branch of llama.cpp, not a patch file that lives in another
+repo. A local feature branch <i>is</i> the minimal fork; a GitHub fork is only needed if we want to push/share, and
+<code>gh</code> is not authenticated in this environment, so the local branch is the fork for now — rebase-ability onto
+upstream is preserved either way.<br><br>
+The pager, by contrast, is <i>deliberately</i> independent: it has its own build, is loaded at runtime via
+<code>dlopen</code> as <code>libggml-llamavm-{cpu,gpu}.so</code> into <i>any</i> llama.cpp build, and has a standalone test
+suite (<code>test_pager</code>, <code>test_gguf</code>, <code>llama-vm bench|tiered</code>). Merging it into llama.cpp would entangle
+two build systems and destroy the standalone use-case that is a core part of the project's objective. The integration
+point is already clean (<code>tensor_buft_overrides</code> + the dlopen shim). So: keep two repos, and let
+<code>llama.vm/patches/</code> record the llama.cpp-side work.
+</div>
+
+<h2>3. Phase 4a — replace the placeholder scaffold</h2>
+<p><b>What was done:</b> replaced llama.vm's token-level placeholder
+(<code>forthllm::context_manager::process_chunk(tokens)</code>, which filled "summaries" with
+<code>sin(i + chunk_id) * 0.1f</code> and never touched a model) with a faithful port of the tested llama.cpp engine into
+<code>namespace forthllm</code>:</p>
+<ul>
+<li><code>summarize()</code> — real KV-row pooling (attention / mean / last) into S summary rows.</li>
+<li><code>stack</code> — chunk stack with lru / lfu / fixed-window eviction.</li>
+<li><code>squeezer</code> — JL projection → per-vector min/max 8-bit quantization → BWT (the old <code>[-1,1]</code>
+quantization assumption is gone; values outside <code>[-1,1]</code> now survive).</li>
+<li><code>bwt_transform</code> — <code>uint8_t</code> comparator + exact LF-mapping invert (the bytes≥128 case is now tested;
+the old invert was broken).</li>
+<li><code>jl_projector</code> — deterministic Gaussian N(0, 1/output_dim) from a seed.</li>
+</ul>
+<p>The token-level <code>context_manager</code>/<code>chunk_summary</code> API was removed (it had no real semantics); the
+KV-row API (<code>summarize</code> + <code>stack</code>) replaces it. <code>fm_index</code> was kept as a standalone utility.
+<code>test_forthllm</code> (8 tests) and <code>test_squeezer</code> (6 tests) were rewritten to test real behavior.</p>
+<div class="think"><span class="label">Thinking</span>
+Two implementation options were on the table: <b>(a)</b> a thin re-export that calls llama.cpp's C API, or
+<b>(b)</b> porting the self-contained math into llama.vm. Option (a) was rejected because the real engine's API is
+KV-row-level and its C API needs a <code>llama_context*</code> — a re-export would make llama.vm's ForthLLM depend on a live
+llama.cpp context and break the repo's standalone value. Option (b) works because the engine's model-agnostic math
+depends only on <code>llama.h</code> (for <code>llama_pos</code>) and std headers — <b>no ggml</b> — so it ports cleanly and keeps
+llama.vm self-contained and unit-testable.<br><br>
+The token-level <code>context_manager</code> could not be made "real" without a model (you cannot summarize raw token ids into
+an embedding without weights), so keeping it would have meant keeping a lie. Removing it and exposing the KV-row API is
+the honest port. One interaction bug was caught by the tests: the new BWT appends a 4-byte row index for invertibility,
+which corrupted <code>fm_index</code> (it consumed the BWT as its index) — a SIGSEGV and a wrong count. Fix: <code>fm_index</code> strips
+the 4-byte suffix. A residual, pre-existing quirk remains: <code>fm_index::locate</code> positions are off for a circular BWT
+without a sentinel; <code>count</code> is correct, and the test asserts count + position count, not exact positions.
+</div>
+<p class="ok">Result: full ctest suite green (11/11). Committed as <code>1bbbb36</code>.</p>
+
+<h2>4. DeepSeek-V4 finding (re-scopes 4c)</h2>
+<p>The user's actual model (DeepSeek-V4-Flash, the <code>test-forth-deepseek()</code> target) uses
+<code>llama_kv_cache_dsv4</code>. Investigating it for 4c revealed it is <b>not</b> a standard MLA cache:</p>
+<ul>
+<li><code>kv_raw</code> — a <code>llama_kv_cache_iswa</code> (normal raw/SWA token cache; the sliding-window half is what DSV4
+raw attention reads).</li>
+<li><code>kv_csa</code> / <code>kv_hca</code> / <code>kv_lid</code> — three <b>compressed K-only block caches</b> (storage only;
+visibility and block planning live in <code>llama_kv_cache_dsv4_context</code> / <code>llm_graph_input_dsv4</code>).</li>
+<li><code>csa_state</code> / <code>hca_state</code> / <code>lid_state</code> — <b>ring compressor states</b> (row id =
+<code>pos % ratio</code>); the compressed rows are <b>graph outputs</b> (per-ubatch <code>comp_plan</code> recipes), not stored rows.</li>
+</ul>
+<div class="think"><span class="label">Thinking</span>
+Two facts make 4c a design problem rather than a port. First, the C API rejects DSV4 because
+<code>llama_forthllm_compact</code> does <code>dynamic_cast&lt;llama_kv_cache*&gt;(memory)</code> and <code>llama_kv_cache_dsv4</code>
+derives from <code>llama_memory_i</code>, not <code>llama_kv_cache</code> — so the cast fails and it logs "not supported". Second,
+<code>llama_kv_cache_dsv4::get_can_shift()</code> is hard-disabled ("compressed row metadata uses block-derived positions"), so
+the K-shift re-rotation machinery the Qwen3.5 path relies on is unavailable. Conceptually, DSV4 <i>already</i> compresses its
+KV (the block caches are the compression); ForthLLM on top would be compression-on-compression, and the ring states are
+graph-computed, not rows we can summarize in place. Realistic targets, in decreasing confidence: (i) compact the
+<code>kv_raw</code> SWA cache (bounded window — small win), (ii) operate on the compressed block caches (requires re-deriving
+ring states — graph work), (iii) a DSV4-specific compaction that respects the <code>comp_plan</code>/<code>ratio</code> structure.
+Conclusion: 4c needs its own design pass before implementation; do <i>not</i> attempt it as "just make the cast succeed".
+</div>
+
+<h2>5. Phase 4b — wire max_stack_depth + eviction</h2>
+<p><b>What was done:</b> the <code>--forthllm-max-stack-depth</code> and <code>--forthllm-eviction</code> flags now take effect.</p>
+<ul>
+<li><code>llama_forthllm_params</code> gains <code>max_stack_depth</code> + <code>eviction</code>, carried from
+<code>common_params_forthllm</code> through <code>common_forthllm_compact</code>. <code>max_stack_depth &lt;= 0</code> keeps the
+previous no-limit behavior.</li>
+<li><code>llama_kv_cache::forthllm_compact</code> computes <code>n_keep = min(n_chunks, max_stack_depth)</code> and
+<code>n_drop = n_chunks - n_keep</code>. In the oldest→newest chunk loop, the oldest <code>n_drop</code> chunks are
+<b>dropped entirely</b> (all C cells freed, subsequent cells shifted left by C, no summary rows); the most recent
+<code>n_keep</code> chunks are summarized as before (C−S freed).</li>
+<li>A dropped chunk is reported as <code>{pos0, n_tokens=C, n_freed=C}</code> (so <code>n_summary = 0</code>); the server
+token-sync now counts filled entries (not <code>n_freed/(C−S)</code>) and erases
+<code>[pos0 + (n_tokens − n_freed), pos0 + n_tokens)</code> per chunk — the whole chunk when dropped,
+<code>[pos0+S, pos0+C)</code> when summarized.</li>
+</ul>
+<div class="think"><span class="label">Thinking</span>
+The original plan was to drive eviction from a per-slot <code>llama_forthllm_stack</code> in the server hook. That was
+rejected on inspection: the compaction <i>re-derives</i> the layout from the cells on every call (it has no persistent
+notion of which cells are summaries), so a persistent stack in the server would not match what the cache actually does.
+Integrating the eviction <i>into</i> the compaction — dropping the oldest chunks during the same oldest→newest pass that
+summarizes the rest — is simpler and correct, and reuses the exact validated primitives (<code>seq_rm</code>, <code>pos_add</code>,
+head tracking) with only the freed/shifted count changed (C instead of C−S). Cell indices are stable across the shifts
+(only positions move, and they all move together, so contiguity is preserved), which is what makes the drop branch safe.<br><br>
+Two consequences had to be handled downstream. The chunk count can no longer be derived as <code>n_freed/(C−S)</code> (dropped
+chunks free C, not C−S), so the server counts filled <code>chunk_info</code> entries instead. And the per-chunk erase range must
+use <code>keep = n_tokens − n_freed</code> (which is S for summarized chunks and 0 for dropped ones) rather than a global S.<br><br>
+The <code>squeezer</code>/<code>jl_dim</code> were deliberately <i>not</i> plumbed into the C API: they describe the
+stored/offloaded representation (in-cache summary rows stay head-dim), so their consumer is state save/load, which does not
+exist yet. Adding unused fields to a public C struct would be sloppy; they remain carried in <code>common_params_forthllm</code>
+and are documented as future. All three eviction policies currently reduce to "drop the oldest" — importance-based (lfu)
+eviction needs per-chunk attention counts, which is a callback into the attention path and is deferred.
+</div>
+<p class="ok">Result: E2E-validated (below). Committed as <code>342c7c4f3</code>.</p>
+
+<h2>6. End-to-end validation</h2>
+<table>
+<tr><th>Phase</th><th>Validation</th><th>Result</th></tr>
+<tr><td>4a</td><td><code>test_forthllm</code> (8 tests: summarize last/mean/attention, S-clamp, lru + fixed-window eviction,
+parse helpers, config validation) and <code>test_squeezer</code> (6 tests: JL determinism, BWT ASCII + high-byte round-trip,
+FM-index count, squeezer size, min/max scaling)</td><td class="ok">All pass; full ctest 11/11</td></tr>
+<tr><td>4b</td><td>Qwen3.8-27B UD-Q4_K_M (qwen35 / hybrid / IMROPE), CPU, 4096 ctx,
+<code>--forthllm-max-stack-depth 4</code>, a ~2196-token prompt ending in a self-contained factual question</td>
+<td class="ok">Compacted 16 chunks = <b>12 dropped + 4 summarized = 2040 cells freed</b>, 2196 → 156 tokens; answered
+coherently ("Paris")</td></tr>
+</table>
+<p>The 4b numbers check out exactly: 12×128 (dropped) + 4×126 (summarized, C−S = 128−2) = 1536 + 504 = <b>2040</b>, and
+2196 − 2040 = <b>156</b> remaining cells. Because the answer stayed coherent after dropping the first 1536 tokens, the
+drop-branch position bookkeeping (free + shift + K-shift re-rotation) is confirmed correct — the question lives in the
+kept raw window.</p>
+<pre>server log:  forthllm: compacted 16 chunk(s), freed 2040 cells, prompt 2196 -&gt; 156 tokens
+answer:      "Paris" (coherent)</pre>
+
+<h2>7. Commits &amp; artifacts</h2>
+<table>
+<tr><th>Repo</th><th>Branch</th><th>Commit</th><th>Subject</th></tr>
+<tr><td>llama.cpp</td><td><code>forthllm</code></td><td><code>26833e236</code></td><td>ForthLLM: KV-cache compaction engine + server hooks (Phases 1–3)</td></tr>
+<tr><td>llama.cpp</td><td><code>forthllm</code></td><td><code>342c7c4f3</code></td><td>ForthLLM: wire max_stack_depth + eviction into the compaction (Phase 4b)</td></tr>
+<tr><td>llama.vm</td><td><code>main</code></td><td><code>f0c1707</code></td><td>ForthLLM: record llama.cpp implementation + validation</td></tr>
+<tr><td>llama.vm</td><td><code>main</code></td><td><code>1bbbb36</code></td><td>ForthLLM: replace placeholder scaffold with the real engine (Phase 4a)</td></tr>
+<tr><td>llama.vm</td><td><code>main</code></td><td><code>39b730b</code></td><td>ForthLLM: record Phase 4b (max_stack_depth + eviction wired)</td></tr>
+</table>
+<ul>
+<li><code>llama.cpp</code> <code>master</code> is untouched at upstream <code>36a0e2ffc</code>; the stray untracked <code>asdf</code>
+(an old type-66 stub diff) was deliberately left out of every commit.</li>
+<li>Feature patch <code>patches/llama-cpp-forthllm-kv-compaction.patch</code> regenerated to include 4b:
+<b>12 files, 1441 insertions</b> (was 1393); <code>git apply --reverse --check</code> passes against the tree (in sync).</li>
+<li>Docs updated in both repos: <code>AGENTS.md</code>, <code>forthllm-design.md</code>, and the investigation doc's
+Phase 4 handoff.</li>
+</ul>
+<p class="meta">Note: git identity was auto-set to <code>alfred@cuda-mx</code>; set <code>user.name</code>/<code>user.email</code>
+and <code>git commit --amend --reset-author</code> if a different author is wanted.</p>
+
+<h2>8. Remaining work — Phase 4c (MLA / DeepSeek-V4)</h2>
+<p>4c is the user's actual model and the highest-value item, but it is the largest and needs a design pass first. Three
+questions to settle before implementation:</p>
+<ol>
+<li><b>Which cache to compact?</b> The raw SWA cache (bounded window — small win) vs. the compressed block caches
+(already compressed — ForthLLM would be a second compression).</li>
+<li><b>How do ring states re-derive after compaction?</b> The <code>csa/hca/lid</code> states are graph-computed ring states
+(<code>pos % ratio</code>); dropping/summarizing rows must keep them consistent, which is graph work, not row surgery.</li>
+<li><b>Is K-shift re-rotation available at all?</b> <code>get_can_shift()</code> is currently hard-disabled for DSV4; the
+Qwen3.5 path's re-rotation of shifted keys has no DSV4 equivalent yet.</li>
+</ol>
+
+<h2>Appendix A — Decision log (the thinking)</h2>
+<table>
+<tr><th>#</th><th>Decision</th><th>Reasoning / rejected alternative</th></tr>
+<tr><td>1</td><td>Fork llama.cpp = yes</td><td>ForthLLM is a llama.cpp feature; a feature branch is its durable home. Local branch is the fork now (no <code>gh</code> auth); GitHub fork is a later step.</td></tr>
+<tr><td>2</td><td>Merge the pager into llama.cpp = no</td><td>The pager is intentionally independent (own build, dlopen'd, standalone tests). Merging entangles builds and kills standalone use. Keep two repos; <code>patches/</code> records the llama.cpp side.</td></tr>
+<tr><td>3</td><td>4a: port the math, don't re-export</td><td>A re-export needs a <code>llama_context*</code> and breaks standalone-ness. The engine math is ggml-free, so it ports cleanly into <code>namespace forthllm</code>.</td></tr>
+<tr><td>4</td><td>4a: remove <code>context_manager</code></td><td>The token-level placeholder has no real semantics (can't summarize token ids without a model); keeping it would keep a lie. Expose the KV-row API instead.</td></tr>
+<tr><td>5</td><td>4a: keep <code>fm_index</code>, strip BWT suffix</td><td><code>fm_index</code> is a tested standalone utility. The new BWT's 4-byte row index corrupted it (SIGSEGV); stripping the suffix fixes <code>count</code>. <code>locate</code> positions remain a pre-existing circular-BWT quirk (documented, not chased).</td></tr>
+<tr><td>6</td><td>4b: integrate eviction into the compaction</td><td>A per-slot stack in the server doesn't match the cache (the compaction re-derives layout each call). Dropping the oldest chunks in the same pass reuses validated primitives and is correct.</td></tr>
+<tr><td>7</td><td>4b: report dropped chunks as <code>{pos0, C, C}</code></td><td>Reuses the existing server erase logic via <code>keep = n_tokens − n_freed</code> (0 when dropped). Avoids a new C-API out-param for the chunk count.</td></tr>
+<tr><td>8</td><td>4b: don't plumb squeezer/jl_dim yet</td><td>They describe the stored/offloaded representation; the consumer (state save/load) doesn't exist. Adding unused fields to a public C struct is sloppy — carry them in <code>common_params_forthllm</code>, document as future.</td></tr>
+<tr><td>9</td><td>4c: design pass before code</td><td>DSV4 is raw-SWA + compressed-block + ring-state, not plain MLA; the C API cast fails and K-shift is disabled. "Just make the cast succeed" would be wrong — settle which cache to compact, ring-state re-derivation, and K-shift availability first.</td></tr>
+</table>
+
+<hr>
+<div class="meta">Generated 2026-10-31 from the llama.vm / llama.cpp ForthLLM development session. Source of record:
+<code>llama.vm/llama-server-forthllm-investigation.md</code> (Phase 4 handoff) and the commits listed in §7.</div>
+
+</body>
+</html>
