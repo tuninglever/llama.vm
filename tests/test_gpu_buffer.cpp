@@ -23,6 +23,7 @@ int main() {
     const size_t WSIZE = 64 * 1024; // each weight: 4 pages
     const size_t N_W   = 4;
 
+    vm_clear_env(); // an ambient LLAMA_VM_GGUF would put the buffer in file mode
     setenv("LLAMA_VM_GPU", "cpu", 1);
     setenv("LLAMA_VM_VRAM", "128K", 1);   // window: holds two weights, not all four
     setenv("LLAMA_VM_RAM", "64K", 1);     // capture tier: holds one weight

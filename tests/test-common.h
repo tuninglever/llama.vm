@@ -72,3 +72,23 @@ static inline void vm_skip(const char * why) {
     std::printf("SKIP: %s\n", why);
     std::exit(0);
 }
+
+// clear every LLAMA_VM_* variable the library reads (budgets, file mode,
+// backend selection) so tests stay hermetic when run from a shell that has
+// them exported for llama-server; tests set the values they need afterwards
+static inline void vm_clear_env() {
+    static const char * vars[] = {
+        "LLAMA_VM_RAM",
+        "LLAMA_VM_VRAM",
+        "LLAMA_VM_SWAP",
+        "LLAMA_VM_GGUF",
+        "LLAMA_VM_GPU",
+        "LLAMA_VM_GGML_PAGE_SIZE",
+        "LLAMA_VM_BACKEND_DIR",
+        "LLAMA_VM_VRAM_DIRECT_IO",
+        "LLAMA_VM_DEBUG",
+    };
+    for (const char * v : vars) {
+        unsetenv(v);
+    }
+}

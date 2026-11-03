@@ -11,6 +11,7 @@ int main() {
     if (std::getenv("LLAMA_VM_TEST_VRAM") == nullptr) {
         vm_skip("set LLAMA_VM_TEST_VRAM=1 to run VRAM tier tests");
     }
+    vm_clear_env(); // an ambient LLAMA_VM_BACKEND_DIR would redirect the backend lookup
     const char * backend = std::getenv("LLAMA_VM_VRAM_BACKEND");
     const std::string backend_name = backend != nullptr ? backend : "cpu";
     std::printf("vram backend: %s\n", backend_name.c_str());

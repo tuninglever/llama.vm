@@ -13,6 +13,7 @@
 using namespace llama_vm;
 
 int main() {
+    vm_clear_env(); // an ambient LLAMA_VM_GGML_PAGE_SIZE would break the page checks
     // ------------------------- buffer type -------------------------------
     ggml_backend_buffer_type_t buft = ggml_buft();
     VM_CHECK(buft != nullptr);

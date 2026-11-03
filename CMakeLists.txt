@@ -102,10 +102,13 @@ set(LLAMA_VM_TESTS
     test_forthllm
     test_squeezer)
 
-# the build tree must shadow any installed libllama_vm.so (an old copy in
-# /usr/local/lib would otherwise win via LD_LIBRARY_PATH, which outranks the
-# binaries' RUNPATH); the rest of the library path is kept as-is
-set(LLAMA_VM_TEST_ENV "LD_LIBRARY_PATH=${CMAKE_BINARY_DIR}:$ENV{LD_LIBRARY_PATH}")
+# the build tree must shadow any installed libllama_vm.so, and the ggml build
+# dir must shadow any installed libggml*.so (an old copy in /usr/local/lib
+# would otherwise win via LD_LIBRARY_PATH, which outranks the binaries'
+# RUNPATH; a ggml runtime older than the headers used to compile this tree is
+# an ABI break — eg. ggml 0.28 inserted alloc_buffer_n/get_alloc_size_n into
+# the buffer_type vtable); the rest of the library path is kept as-is
+set(LLAMA_VM_TEST_ENV "LD_LIBRARY_PATH=${CMAKE_BINARY_DIR}:${LlamaVM_LLAMA_BUILD_BIN}:$ENV{LD_LIBRARY_PATH}")
 
 foreach (t IN LISTS LLAMA_VM_TESTS)
     add_executable(${t} tests/${t}.cpp)

@@ -5,3 +5,5 @@ build-dbg/
 core
 core.*
 .#*
+*~
+\#*#
