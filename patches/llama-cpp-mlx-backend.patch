@@ -1,0 +1,199 @@
+diff --git a/ggml/CMakeLists.txt b/ggml/CMakeLists.txt
+index 119669204..47678dfec 100644
+--- a/ggml/CMakeLists.txt
++++ b/ggml/CMakeLists.txt
+@@ -240,6 +240,8 @@ option(GGML_METAL                           "ggml: use Metal"
+ option(GGML_METAL_NDEBUG                    "ggml: disable Metal debugging"                   OFF)
+ option(GGML_METAL_SHADER_DEBUG              "ggml: compile Metal with -fno-fast-math"         OFF)
+ option(GGML_METAL_EMBED_LIBRARY             "ggml: embed Metal library"                       ${GGML_METAL})
++
++option(GGML_MLX                             "ggml: use MLX"                                   OFF)
+ set   (GGML_METAL_MACOSX_VERSION_MIN "" CACHE STRING
+                                             "ggml: metal minimum macOS version")
+ set   (GGML_METAL_STD "" CACHE STRING       "ggml: metal standard version (-std flag)")
+diff --git a/ggml/src/CMakeLists.txt b/ggml/src/CMakeLists.txt
+index fe001a042..b6dd7dae6 100644
+--- a/ggml/src/CMakeLists.txt
++++ b/ggml/src/CMakeLists.txt
+@@ -602,6 +602,7 @@ ggml_add_backend(CUDA)
+ ggml_add_backend(ET)
+ ggml_add_backend(HIP)
+ ggml_add_backend(METAL)
++ggml_add_backend(MLX)
+ ggml_add_backend(MUSA)
+ ggml_add_backend(RPC)
+ ggml_add_backend(VirtGPU)
+diff --git a/ggml/src/ggml-backend-reg.cpp b/ggml/src/ggml-backend-reg.cpp
+index 4e9681c9f..8c777aba8 100644
+--- a/ggml/src/ggml-backend-reg.cpp
++++ b/ggml/src/ggml-backend-reg.cpp
+@@ -589,6 +589,7 @@ void ggml_backend_load_all_from_path(const char * dir_path) {
+     ggml_backend_load_best("hexagon", silent, dir_path);
+     ggml_backend_load_best("musa", silent, dir_path);
+     ggml_backend_load_best("openvino", silent, dir_path);
++    ggml_backend_load_best("mlx", silent, dir_path);
+     ggml_backend_load_best("cpu", silent, dir_path);
+     // check the environment variable GGML_BACKEND_PATH to load an out-of-tree backend
+     const char * backend_path = std::getenv("GGML_BACKEND_PATH");
+diff --git a/ggml/src/ggml-mlx/ggml-mlx.cpp b/ggml/src/ggml-mlx/ggml-mlx.cpp
+index 3b234dca5..e466e9b9d 100644
+--- a/ggml/src/ggml-mlx/ggml-mlx.cpp
++++ b/ggml/src/ggml-mlx/ggml-mlx.cpp
+@@ -59,11 +59,6 @@ static mlx::core::Shape ggml_tensor_shape(ggml_tensor * tensor) {
+     return shape;
+ }
+ 
+-// Deleter for MLX array data
+-static void mlx_free(void * p) {
+-    free(p);
+-}
+-
+ // Backend operations
+ static const char * ggml_mlx_backend_name(ggml_backend_t backend) {
+     return "MLX";
+@@ -87,7 +82,7 @@ static void ggml_mlx_set_tensor_async(ggml_backend_t backend, ggml_tensor * tens
+     memcpy(host_data, data, size);
+ 
+     // Create MLX array with a deleter that frees the host memory
+-    auto arr = mlx::core::array(host_data, shape, dtype, mlx_free);
++    auto arr = mlx::core::array(host_data, shape, dtype, [](void * p) { free(p); });
+ 
+     // Store result
+     ctx->tensor_arrays.insert({tensor, arr});
+@@ -147,16 +142,16 @@ static enum ggml_status ggml_mlx_graph_compute(ggml_backend_t backend, ggml_cgra
+         mlx::core::array result = mlx::core::array(0.0f);
+         switch (node->op) {
+             case GGML_OP_ADD:
+-                result = inputs[0] + inputs[1];
++                result = mlx::core::add(inputs[0], inputs[1]);
+                 break;
+             case GGML_OP_SUB:
+-                result = inputs[0] - inputs[1];
++                result = mlx::core::subtract(inputs[0], inputs[1]);
+                 break;
+             case GGML_OP_MUL:
+-                result = inputs[0] * inputs[1];
++                result = mlx::core::multiply(inputs[0], inputs[1]);
+                 break;
+             case GGML_OP_DIV:
+-                result = inputs[0] / inputs[1];
++                result = mlx::core::divide(inputs[0], inputs[1]);
+                 break;
+             case GGML_OP_MUL_MAT:
+                 result = mlx::core::matmul(inputs[0], inputs[1]);
+@@ -173,9 +168,18 @@ static enum ggml_status ggml_mlx_graph_compute(ggml_backend_t backend, ggml_cgra
+             case GGML_OP_LOG:
+                 result = mlx::core::log(inputs[0]);
+                 break;
+-            case GGML_UNARY_OP_SILU:
+-                result = inputs[0] * (1.0 / (1.0 + mlx::core::exp(-inputs[0])));
++            case GGML_UNARY_OP_SILU: {
++                // SILU: x * sigmoid(x)
++                auto sig = mlx::core::divide(
++                    mlx::core::array(1.0f),
++                    mlx::core::add(
++                        mlx::core::array(1.0f),
++                        mlx::core::exp(mlx::core::negative(inputs[0]))
++                    )
++                );
++                result = mlx::core::multiply(inputs[0], sig);
+                 break;
++            }
+             case GGML_OP_RMS_NORM:
+                 // Simplified RMS norm
+                 result = inputs[0];
+@@ -252,11 +256,90 @@ static bool ggml_mlx_device_supports_buft(ggml_backend_dev_t dev, ggml_backend_b
+     return true;
+ }
+ 
+-// Registration
++// MLX backend - device
++static const char * ggml_mlx_device_get_name(ggml_backend_dev_t dev) {
++    return "MLX0";
++}
++
++static const char * ggml_mlx_device_get_description(ggml_backend_dev_t dev) {
++    return "MLX GPU";
++}
++
++static void ggml_mlx_device_get_memory(ggml_backend_dev_t dev, size_t * free, size_t * total) {
++    // Report some reasonable memory values
++    *free = 8ULL * 1024 * 1024 * 1024;  // 8 GB free
++    *total = 16ULL * 1024 * 1024 * 1024; // 16 GB total
++}
++
++static enum ggml_backend_dev_type ggml_mlx_device_get_type(ggml_backend_dev_t dev) {
++    return GGML_BACKEND_DEVICE_TYPE_GPU;
++}
++
++static void ggml_mlx_device_get_props(ggml_backend_dev_t dev, struct ggml_backend_dev_props * props) {
++    props->name        = ggml_mlx_device_get_name(dev);
++    props->description = ggml_mlx_device_get_description(dev);
++    props->type        = ggml_mlx_device_get_type(dev);
++    ggml_mlx_device_get_memory(dev, &props->memory_free, &props->memory_total);
++    props->caps = {
++        /* .async                 = */ false,
++        /* .host_buffer           = */ false,
++        /* .buffer_from_host_ptr  = */ false,
++        /* .events                = */ false,
++        /* .mmap_support          = */ false,
++    };
++}
++
++static ggml_backend_t ggml_mlx_device_init_backend(ggml_backend_dev_t dev, const char * params) {
++    return ggml_mlx_device_init(dev, params);
++}
++
++static ggml_backend_buffer_type_t ggml_mlx_device_get_buffer_type(ggml_backend_dev_t dev) {
++    return ggml_backend_cpu_buffer_type();
++}
++
++static const struct ggml_backend_device_i ggml_mlx_dev_i = {
++    /* .get_name             = */ ggml_mlx_device_get_name,
++    /* .get_description      = */ ggml_mlx_device_get_description,
++    /* .get_memory           = */ ggml_mlx_device_get_memory,
++    /* .get_type             = */ ggml_mlx_device_get_type,
++    /* .get_props            = */ ggml_mlx_device_get_props,
++    /* .init_backend         = */ ggml_mlx_device_init_backend,
++    /* .get_buffer_type      = */ ggml_mlx_device_get_buffer_type,
++    /* .get_host_buffer_type = */ NULL,
++    /* .buffer_from_host_ptr = */ NULL,
++    /* .supports_op          = */ ggml_mlx_device_supports_op,
++    /* .supports_buft        = */ ggml_mlx_device_supports_buft,
++    /* .offload_op           = */ NULL,
++    /* .event_new            = */ NULL,
++    /* .event_free           = */ NULL,
++    /* .event_synchronize    = */ NULL,
++};
++
++// MLX backend - backend (reg)
++static const char * ggml_mlx_reg_get_name(ggml_backend_reg_t reg) {
++    return "MLX";
++}
++
++static size_t ggml_mlx_reg_get_device_count(ggml_backend_reg_t reg) {
++    return 1;
++}
++
++static ggml_backend_dev_t ggml_mlx_reg_get_device(ggml_backend_reg_t reg, size_t index) {
++    GGML_ASSERT(index == 0);
++
++    static struct ggml_backend_device dev = {
++        /* .iface   = */ ggml_mlx_dev_i,
++        /* .reg     = */ NULL,
++        /* .context = */ NULL,
++    };
++
++    return &dev;
++}
++
+ static const struct ggml_backend_reg_i ggml_mlx_reg_i = {
+-    /* .get_name         = */ NULL,
+-    /* .get_device_count = */ NULL,
+-    /* .get_device       = */ NULL,
++    /* .get_name         = */ ggml_mlx_reg_get_name,
++    /* .get_device_count = */ ggml_mlx_reg_get_device_count,
++    /* .get_device       = */ ggml_mlx_reg_get_device,
+     /* .get_proc_address = */ NULL,
+ };
+ 
