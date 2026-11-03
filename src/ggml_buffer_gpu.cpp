@@ -1025,11 +1025,13 @@ namespace llama_vm {
                 return &s.reg;
             }
             s.loading = true;
+            
             // load the inner backend library (eg. libggml-hip.so) from a separate build tree.
             // Load it directly by path rather than ggml_backend_load_all_from_path: that
             // helper re-reads GGML_BACKEND_PATH at its end, which would reload this shim and
             // register the wrapper reg before inner_dev is resolved (0 devices).
             const char * backend_dir = std::getenv("LLAMA_VM_BACKEND_DIR");
+            
             if (backend_dir != nullptr && backend_dir[0] != '\0') {
                 const std::string target = gpu_target();
                 const char * prefixes[] = { "libggml-hip-", "libggml-cuda-", "libggml-vulkan-", "libggml-cpu." };
@@ -1039,9 +1041,12 @@ namespace llama_vm {
                 if (target == "vulkan") prefix = prefixes[2];
                 if (target == "cpu")    prefix = prefixes[3];
                 if (prefix != nullptr) {
+                    
                     for (const auto & entry : std::filesystem::directory_iterator(backend_dir)) {
                         const std::string fn = entry.path().filename().string();
+                        
                         if (fn.rfind(prefix, 0) == 0 && fn.rfind(".so") == fn.size() - 3) {
+                            
                             ggml_backend_load(entry.path().string().c_str());
                             break;
                         }

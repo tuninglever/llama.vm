@@ -17,6 +17,9 @@ int main() {
     const std::string swap = "/tmp/llama_vm_test_captured.swap";
     std::remove(swap.c_str());
 
+    // Use the build-mlx directory for backend libraries
+    setenv("LLAMA_VM_BACKEND_DIR", "/Volumes/work/llama.cpp/build-mlx/bin", 1);
+
     config cfg;
     cfg.page_size    = PAGE;
     cfg.ram_capacity = RAM;
