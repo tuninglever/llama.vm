@@ -15,14 +15,15 @@ The MLX backend (`llama.cpp/ggml/src/ggml-mlx/`) implements the ggml backend API
    brew install mlx
    ```
 
-2. Build llama.cpp with MLX support:
+2. Build llama.cpp with MLX support (in the `build-mlx` build dir, per
+   [BUILD.md](BUILD.md)):
    ```bash
-   cmake -S llama.cpp -B llama.cpp/build \
+   cmake -S llama.cpp -B llama.cpp/build-mlx \
 	   -DGGML_MLX=ON -DCMAKE_BUILD_TYPE=Release \
 	   -DCMAKE_PREFIX_PATH=/opt/homebrew/opt/libomp \
 	   -DOpenMP_CXX_FLAGS="-Xpreprocessor -fopenmp" \
 	   -DOpenMP_CXX_LIBRARIES="/opt/homebrew/opt/libomp/lib/libomp.dylib"
-   cmake --build llama.cpp/build --target ggml -j
+   cmake --build llama.cpp/build-mlx --target ggml -j
    ```
 
 ### Building llama.vm

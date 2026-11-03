@@ -66,9 +66,11 @@ design.md, planning.md        original design and roadmap
 Requires a llama.cpp tree, built and with prebuilt ggml libraries.
 
 ```sh
-# 1. (optional) apply the llama.cpp patches for the full feature set
+# 1. apply the llama.cpp patches (type-66 stub + ForthLLM flags by default;
+#    --pager-only for the type-66 stub only)
 patches/apply-llama.cpp-patches.sh /path/to/llama.cpp
-cmake --build /path/to/llama.cpp/build --target ggml-base ggml -j
+# rebuild in your platform's build dir (build, build-hip, build-cuda, build-mlx)
+cmake --build /path/to/llama.cpp/<build-dir> --target ggml-base ggml -j
 
 # 2. build llama.vm
 cmake -S . -B build -DLlamaVM_LLAMA_CPP_DIR=/path/to/llama.cpp
@@ -81,13 +83,14 @@ ctest --test-dir build --output-on-failure
 ### The llama.cpp patches
 
 llama.vm integrates with llama.cpp through the ggml backend registry (dlopen),
-so it does not need to live inside the llama.cpp tree. Two small patches are
-required for the full feature set — see [`patches/README.md`](patches/README.md):
+so it does not need to live inside the llama.cpp tree. The patches (see
+[`patches/README.md`](patches/README.md)) are:
 
 - **type-66 stub** — lets Kimi-K3 `UD-Q1_0` GGUF files (a quant not yet in
   upstream ggml) parse and page.
-- **MoE ids host buffer** — lets the scheduler read a MoE `ids` tensor directly
-  from host memory on an integrated GPU.
+- **ForthLLM KV-cache compaction** — the `--forthllm-*` llama-server flags, the
+  chunked KV-row summarization engine, and the server's post-prefill +
+  context-pressure compaction hooks (applied by default; `--pager-only` skips it).
 
 Without them, core paging over standard GGUF still works.
 

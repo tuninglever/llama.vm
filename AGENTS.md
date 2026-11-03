@@ -44,10 +44,16 @@ once and re-faults drop to zero (28 G window: faults=7683, 12.8 t/s vs 2.3 t/s a
 3 GiB window). The host buffer (`LLAMA_VM`) still must hold the whole model in RAM, but it
 now rejects an operator budget (`LLAMA_VM_RAM`) below the model size instead of silently
 malloc'ing it. The budgets are read by the buffers from the `LLAMA_VM_*` env vars
-(`LLAMA_VM_RAM`, `LLAMA_VM_VRAM`, `LLAMA_VM_SWAP`, `LLAMA_VM_GGUF`). Note (verified
-2026-10-30): the `--llama-vm-*` CLI flags are **not** present in the current llama.cpp
-build (`/work/llama.cpp`, clean upstream) — passing them fails with
-`error: invalid argument`; set the env vars instead. See
+(`LLAMA_VM_RAM`, `LLAMA_VM_VRAM`, `LLAMA_VM_SWAP`, `LLAMA_VM_GGUF`). Note: the
+`--llama-vm-*` CLI flags are **not** present in any llama.cpp build (upstream or
+patched) — passing them fails with `error: invalid argument`; set the env vars
+instead. The `/work/llama.cpp` clone carries the llama.vm patches (we do not own
+llama.cpp; the patches live in `patches/` and are applied with
+`patches/apply-llama.cpp-patches.sh`, which applies the ggml type-66 stub and the
+ForthLLM feature patch (`--forthllm-*` flags + KV-cache compaction) by default,
+`--pager-only` for the stub only), applied and rebuilt 2026-11-02 against upstream
+`785322d17` (re-validated E2E on Qwen3.8-27B). If the clone is updated,
+re-run the apply script. See
 `llama-server-forthllm-investigation.md`.
 **The objective is not yet met**: model > RAM (CPU) still relies on the OS page cache.
 See *Next steps*.
@@ -223,7 +229,7 @@ Note: llama.cpp may need a small **load-only stub for ggml type 66**
 (`GGML_TYPE_KIMI_Q1_0`, see `patches/ggml-type66-kimi-q1-0-stub.patch`). Kimi-K3's
 `UD-Q1_0` quant uses type 66, which is not in upstream ggml; the stub gives it the measured
 19/128 bytes/elem so GGUF files using it parse and page correctly (no dequant kernels).
-Rebuild the ggml libs after touching it: `cmake --build <llama.cpp>/build --target ggml-base ggml -j`.
+Rebuild the ggml libs after touching it: `cmake --build <llama.cpp>/<build-dir> --target ggml-base ggml -j` (your platform's build dir: `build`, `build-hip`, `build-cuda`, `build-mlx`).
 
 ```sh
 cmake -S . -B build -DLlamaVM_LLAMA_CPP_DIR=/path/to/llama.cpp
@@ -430,7 +436,10 @@ Measured on a 28 GB Qwen3.6-27B Q8_0 (model on the page cache):
    `--forthllm-*` flags, the summarization engine, `llama_kv_cache::forthllm_compact`
    incl. hybrid/IMROPE support, and the server's post-prefill, context-limit-stop,
    and pre-context-shift hooks); validated end-to-end on Qwen3.8-27B (2196-token
-   prompt → 180 cells, coherent answer). The patch is `patches/llama-cpp-forthllm-kv-compaction.patch`.
+   prompt → 180 cells, coherent answer). The patch is
+    `patches/llama-cpp-forthllm-kv-compaction.patch`; it is applied to the
+    `/work/llama.cpp` clone (upstream `785322d17`, 2026-11-02) and re-validated
+    E2E (8 chunks compacted, 1008 cells freed, coherent "Paris" answer).
    Phase 4a is done: this repo's `include/forthllm/` + `src/forthllm.cpp` (+
    `squeezer`/`bwt`/`fm_index`/`jl_projector`) scaffold is now a faithful port of the
    tested llama.cpp engine (real summarize/stack/squeezer/BWT, no more `sin()`
