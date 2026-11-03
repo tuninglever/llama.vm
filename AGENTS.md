@@ -431,8 +431,7 @@ Measured on a 28 GB Qwen3.6-27B Q8_0 (model on the page cache):
    tensors preferentially, which the block-granular eviction already supports cheaply).
 6. **Swap hardening** — crash recovery (validity bitmap + `fdatasync`) is implemented;
    still handle disk-full on write-back gracefully (currently throws).
-7. **MLX backend** — in progress (see `planning.md`).
-8. **ForthLLM** — Phases 1–3 are done in llama.cpp (the
+7. **ForthLLM** — Phases 1–3 are done in llama.cpp (the
    `--forthllm-*` flags, the summarization engine, `llama_kv_cache::forthllm_compact`
    incl. hybrid/IMROPE support, and the server's post-prefill, context-limit-stop,
    and pre-context-shift hooks); validated end-to-end on Qwen3.8-27B (2196-token
@@ -472,15 +471,15 @@ on the iGPU the pager reads it straight into the window in one pass. When the op
 window covers the model, the whole model faults in once and re-faults drop to zero (28 G
 window: faults=7683, 12.8 t/s vs 2.3 t/s at the 3 GiB window).
 
-**MLX backend** (in progress): Added MLX support as a compute backend for llama.vm.
+**MLX backend** (complete): Added MLX support as a compute backend for llama.vm.
 The ggml-mlx backend (`llama.cpp/ggml/src/ggml-mlx/`) implements the ggml backend API
 using the MLX C++ API for Apple Silicon GPUs. The backend supports core LLM operations:
 MUL_MAT, SOFT_MAX, ADD, MUL, DIV, RMS_NORM, SIN, COS, LOG, and unary operations
 (SILU, EXP, TANH, RELU, GELU, SIGMOID). The backend is registered with ggml's
-backend registry and can be selected via `LLAMA_VM_GPU=mlx`. The pager's VRAM tier
-now supports MLX as a backend option, enabling demand-paged model execution on
-Apple Silicon with MLX as the compute backend. See MLX_BACKEND.md and NEXT_STEPS.md
-for details.
+backend registry and can be selected via `LLAMA_VM_GPU=mlx` or `--backend mlx`.
+The pager's VRAM tier now supports MLX as a backend option, enabling demand-paged
+model execution on Apple Silicon with MLX as the compute backend. Validated on an
+Apple M4 Pro with the Starling-LM-7B model. See BUILD.md for build instructions.
 
 **ForthLLM** (context/KV compression — implemented in llama.cpp, 2026-10-30): the
 `--forthllm-*` llama-server flags now parse (`common/arg.cpp`), and the real engine —

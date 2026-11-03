@@ -1032,7 +1032,7 @@ namespace llama_vm {
             const char * backend_dir = std::getenv("LLAMA_VM_BACKEND_DIR");
             if (backend_dir != nullptr && backend_dir[0] != '\0') {
                 const std::string target = gpu_target();
-                const char * prefixes[] = { "libggml-hip-", "libggml-cuda-", "libggml-vulkan-", "libggml-cpu-" };
+                const char * prefixes[] = { "libggml-hip-", "libggml-cuda-", "libggml-vulkan-", "libggml-cpu." };
                 const char * prefix = nullptr;
                 if (target == "hip")    prefix = prefixes[0];
                 if (target == "cuda")   prefix = prefixes[1];
