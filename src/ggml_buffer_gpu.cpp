@@ -525,6 +525,10 @@ namespace {
             return GGML_STATUS_SUCCESS;
         }
 
+        // hot set optimization: track this decode call so eviction decisions
+        // can keep frequently accessed weights resident
+        pg->begin_decode_call();
+
         const bool do_prefetch = pg->get_config().prefetch;
         if (do_prefetch) {
             // drop the previous graph's leftover prefetch work (stale ranges)
@@ -733,6 +737,11 @@ namespace {
     }
     bool dev_supports_op(ggml_backend_dev_t dev, const struct ggml_tensor * op) {
         (void) dev;
+        // GGML_OP_NONE is a no-op (pre-allocated tensor, not part of compute graph)
+        // that our graph_compute skips, so we claim to support it
+        if (op->op == GGML_OP_NONE) {
+            return true;
+        }
         return ggml_backend_dev_supports_op(S().inner_dev, op);
     }
     bool dev_supports_buft(ggml_backend_dev_t dev, ggml_backend_buffer_type_t buft) {

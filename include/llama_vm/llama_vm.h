@@ -217,6 +217,10 @@ namespace llama_vm {
         // drop all pending prefetch work (the worker finishes whatever page it is on)
         void cancel_prefetch();
 
+        // hot set tracking: called at the start of each decode call to optimize
+        // eviction decisions (keep frequently accessed weights resident)
+        void begin_decode_call();
+
         stats get_stats() const;
         void  reset_stats();
         const config & get_config() const;

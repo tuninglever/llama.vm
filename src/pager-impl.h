@@ -153,6 +153,15 @@ namespace llama_vm {
         // stats
         stats st;
 
+        // hot set: tensors accessed frequently in recent decode calls should stay
+        // resident across calls. we track access counts per tensor and use them to
+        // bias eviction decisions. this is the "token batching optimization": the
+        // same weights are needed for every generated token, so evicting them between
+        // decode calls is wasteful
+        std::map<std::string, uint64_t> tensor_access_count; // tensor name -> access count
+        uint64_t decode_call_count = 0;
+        size_t hot_set_size = 0; // in bytes, tensors in the hot set
+
         // prefetch worker. a task is a page or a whole tensor; tensor tasks are
         // staged as one contiguous arena block so a later gather (tensor_data) finds
         // the pages already contiguous and reuses the block without copying
@@ -214,6 +223,11 @@ namespace llama_vm {
         // stage a whole tensor in tier t as one contiguous block (best effort);
         // called with the mutex held
         void prefetch_tensor(size_t tensor_id, tier t);
+
+        // hot set tracking: called at the start of each decode call
+        void begin_decode_call();
+        bool tensor_is_hot(const std::string & name) const;
+        void track_tensor_access(const std::string & name);
 
         int region_fd_for(size_t page_id) const;
     };
