@@ -5,7 +5,7 @@
 > `llama_kv_cache::forthllm_compact` with the server's post-prefill + context-pressure
 > hooks), validated end-to-end on Qwen3.8-27B. Patch:
 > `patches/llama-cpp-forthllm-kv-compaction.patch`.
-> Applied to the `/work/llama.cpp` clone (upstream `785322d17`, 2026-11-02;
+> Applied to the `/work/llama.cpp` clone (upstream `45b6604b2`, 2026-11-05;
 > re-apply with `patches/apply-llama.cpp-patches.sh` after a tree update).
 >
 > `--forthllm-max-stack-depth` / `--forthllm-eviction` are wired (Phase 4b): the

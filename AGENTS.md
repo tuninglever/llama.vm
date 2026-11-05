@@ -51,8 +51,8 @@ instead. The `/work/llama.cpp` clone carries the llama.vm patches (we do not own
 llama.cpp; the patches live in `patches/` and are applied with
 `patches/apply-llama.cpp-patches.sh`, which applies the ggml type-66 stub and the
 ForthLLM feature patch (`--forthllm-*` flags + KV-cache compaction) by default,
-`--pager-only` for the stub only), applied and rebuilt 2026-11-02 against upstream
-`785322d17` (re-validated E2E on Qwen3.8-27B). If the clone is updated,
+`--pager-only` for the stub only), applied and rebuilt 2026-11-05 against upstream
+`45b6604b2` (re-validated E2E on Qwen3.8-27B). If the clone is updated,
 re-run the apply script. See
 `llama-server-forthllm-investigation.md`.
 **The objective is not yet met**: model > RAM (CPU) still relies on the OS page cache.
@@ -446,7 +446,7 @@ Measured on a 28 GB Qwen3.6-27B Q8_0 (model on the page cache):
    and pre-context-shift hooks); validated end-to-end on Qwen3.8-27B (2196-token
    prompt → 180 cells, coherent answer). The patch is
     `patches/llama-cpp-forthllm-kv-compaction.patch`; it is applied to the
-    `/work/llama.cpp` clone (upstream `785322d17`, 2026-11-02) and re-validated
+    `/work/llama.cpp` clone (upstream `45b6604b2`, 2026-11-05) and re-validated
     E2E (8 chunks compacted, 1008 cells freed, coherent "Paris" answer).
    Phase 4a is done: this repo's `include/forthllm/` + `src/forthllm.cpp` (+
    `squeezer`/`bwt`/`fm_index`/`jl_projector`) scaffold is now a faithful port of the
@@ -527,6 +527,15 @@ the llama.cpp KV-cache API survey, and the phased implementation are in
   shared arena block being reallocated, not a bad load.
 - `stats` (`get_stats()`) exposes faults/evictions/swap counters; `test_gguf` prints them
   on success, which makes regressions (e.g. unexpected swap traffic) visible.
+- **After `git pull` in the llama.cpp clone, the ForthLLM patch can appear to "not fit"
+  when it actually applies fine.** The patch creates three *new* files
+  (`include/llama-forthllm.h`, `src/forthllm.cpp`, `tests/test-forthllm.cpp`); a pull
+  discards the tracked edits but leaves those untracked files behind, and `git apply`
+  refuses to create a file that already exists — so the whole patch is rejected with a
+  misleading context error. Fix: delete the three untracked files, re-run
+  `patches/apply-llama.cpp-patches.sh`, then rebuild the ggml libs + server in each
+  platform's build dir. (Hit on 2026-11-04 and again on 2026-11-05 after the pull to
+  `45b6604b2`, where both patches applied cleanly with no re-roll.)
 - **CUDA device indices are not nvidia-smi indices.** The wrapper's `LLAMA_VM_GPU=cudaN`
   (and the VRAM window's device) select by the CUDA *runtime* device order, which on a
   multi-GPU box can differ from `nvidia-smi`'s bus ordering. On the P6000/3060 box,

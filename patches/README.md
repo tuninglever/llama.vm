@@ -37,8 +37,9 @@ cmake --build "$LLAMA_BUILD" --target llama-server test-forthllm -j
 ```
 
 The patches are generated against the llama.cpp revision llama.vm was developed
-against (re-rolled 2026-11-02 for upstream `785322d17`, which the
-`/work/llama.cpp` clone is at); if a newer tree does not apply cleanly, the
+against (re-rolled 2026-11-02 for upstream `785322d17`); they apply cleanly to
+the current clone at upstream `45b6604b2` (verified 2026-11-05, no re-roll
+needed). If a newer tree does not apply cleanly, the
 change may already be upstream (check
 `git log --oneline -S GGML_TYPE_KIMI_Q1_0 -- ggml/include/ggml.h` for the
 type-66 stub), or the surrounding code may have moved and the patch needs a
