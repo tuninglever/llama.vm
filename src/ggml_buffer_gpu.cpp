@@ -525,10 +525,6 @@ namespace {
             return GGML_STATUS_SUCCESS;
         }
 
-        // hot set optimization: track this decode call so eviction decisions
-        // can keep frequently accessed weights resident
-        pg->begin_decode_call();
-
         const bool do_prefetch = pg->get_config().prefetch;
         if (do_prefetch) {
             // drop the previous graph's leftover prefetch work (stale ranges)
@@ -1042,22 +1038,25 @@ namespace llama_vm {
             const char * backend_dir = std::getenv("LLAMA_VM_BACKEND_DIR");
             
             if (backend_dir != nullptr && backend_dir[0] != '\0') {
-                const std::string target = gpu_target();
-                const char * prefixes[] = { "libggml-hip-", "libggml-cuda-", "libggml-vulkan-", "libggml-cpu." };
-                const char * prefix = nullptr;
-                if (target == "hip")    prefix = prefixes[0];
-                if (target == "cuda")   prefix = prefixes[1];
-                if (target == "vulkan") prefix = prefixes[2];
-                if (target == "cpu")    prefix = prefixes[3];
-                if (prefix != nullptr) {
-                    
-                    for (const auto & entry : std::filesystem::directory_iterator(backend_dir)) {
-                        const std::string fn = entry.path().filename().string();
-                        
-                        if (fn.rfind(prefix, 0) == 0 && fn.rfind(".so") == fn.size() - 3) {
-                            
-                            ggml_backend_load(entry.path().string().c_str());
-                            break;
+                if (!std::filesystem::is_directory(backend_dir)) {
+                    std::fprintf(stderr, "llama.vm GPU backend: LLAMA_VM_BACKEND_DIR '%s' is not a "
+                                         "directory; ignoring it (the inner backend must already be "
+                                         "loaded in the process)\n", backend_dir);
+                } else {
+                    const std::string target = gpu_target();
+                    const char * prefixes[] = { "libggml-hip-", "libggml-cuda-", "libggml-vulkan-", "libggml-cpu." };
+                    const char * prefix = nullptr;
+                    if (target == "hip")    prefix = prefixes[0];
+                    if (target == "cuda")   prefix = prefixes[1];
+                    if (target == "vulkan") prefix = prefixes[2];
+                    if (target == "cpu")    prefix = prefixes[3];
+                    if (prefix != nullptr) {
+                        for (const auto & entry : std::filesystem::directory_iterator(backend_dir)) {
+                            const std::string fn = entry.path().filename().string();
+                            if (fn.rfind(prefix, 0) == 0 && fn.rfind(".so") == fn.size() - 3) {
+                                ggml_backend_load(entry.path().string().c_str());
+                                break;
+                            }
                         }
                     }
                 }

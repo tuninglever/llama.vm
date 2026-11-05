@@ -427,8 +427,6 @@ int main() {
         cfg.page_size    = PAGE;
         cfg.ram_capacity = 4 * PAGE;
         cfg.vram_capacity = 4 * PAGE;
-        // Use the build-mlx directory for backend libraries
-        setenv("LLAMA_VM_BACKEND_DIR", "/Volumes/work/llama.cpp/build-mlx/bin", 1);
         cfg.vram_backend = "cpu";
         cfg.prefetch     = true;
 

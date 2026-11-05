@@ -247,20 +247,6 @@ namespace llama_vm {
         }
     }
 
-    // check if a tensor is in the hot set (accessed frequently recently)
-    bool pager::impl::tensor_is_hot(const std::string & name) const {
-        auto it = tensor_access_count.find(name);
-        if (it == tensor_access_count.end()) {
-            return false;
-        }
-        // a tensor is hot if it was accessed in the last decode call
-        return it->second >= decode_call_count;
-    }
-
-    void pager::impl::track_tensor_access(const std::string & name) {
-        tensor_access_count[name] = decode_call_count;
-    }
-
     void pager::impl::evict_one(tier t, size_t need) {
         auto & lru = lru_of(t);
         auto & ar  = arena_of(t);
@@ -273,8 +259,7 @@ namespace llama_vm {
 
         // A gathered tensor's pages share one arena block, so the block is the unit of
         // eviction: freeing it takes every resident page it holds. two passes: first evict
-        // blocks that need no swap write-back, then dirty ones. within each pass, prefer
-        // evicting non-hot tensors (those not accessed in the recent decode calls)
+        // blocks that need no swap write-back, then dirty ones
         for (int pass = 0; pass < 2; ++pass) {
             for (auto it = lru.rbegin(); it != lru.rend(); ++it) {
                 const size_t v = *it;
@@ -288,7 +273,6 @@ namespace llama_vm {
 
                 bool blocked    = false; // a pinned / host co-tenant in the block
                 bool needs_swap = false; // a dirty last-copy page in the block
-                bool is_hot     = false; // a hot tensor (accessed recently)
                 for (size_t u = 0; u < pages.size(); ++u) {
                     if (!resident(u, t)) {
                         continue;
@@ -304,19 +288,8 @@ namespace llama_vm {
                     if (pages[u].dirty && !resident(u, o)) {
                         needs_swap = true;
                     }
-                    // check if this page belongs to a hot tensor
-                    const size_t rid = page_region[u];
-                    for (const auto & ti : tensors) {
-                        if (page_region[ti.page_begin] == rid) {
-                            if (tensor_is_hot(ti.name)) {
-                                is_hot = true;
-                            }
-                            break;
-                        }
-                    }
                 }
-                // in pass 0, skip hot tensors; in pass 1, evict them if needed
-                if (blocked || (pass == 0 && (needs_swap || is_hot))) {
+                if (blocked || (pass == 0) == needs_swap) {
                     continue;
                 }
                 if (needs_swap) {
@@ -547,10 +520,6 @@ namespace llama_vm {
             q.push_back({id, t, is_tensor});
         }
         qcv.notify_one();
-    }
-
-    void pager::impl::begin_decode_call() {
-        decode_call_count++;
     }
 
     void pager::impl::prefetch_tensor(size_t tensor_id, tier t) {
@@ -998,9 +967,6 @@ namespace llama_vm {
         }
         p->st.n_resolve++;
 
-        // track tensor access for hot set optimization
-        p->track_tensor_access(ti->name);
-
         const region & r = p->regions[p->page_region[ti->page_begin]];
         if (r.is_captured) {
             for (size_t pid = ti->page_begin; pid < ti->page_end; ++pid) {
@@ -1195,11 +1161,6 @@ namespace llama_vm {
     void pager::cancel_prefetch() {
         std::lock_guard<std::mutex> lock(p->qmutex);
         p->q.clear();
-    }
-
-    void pager::begin_decode_call() {
-        std::lock_guard<std::mutex> lock(p->mutex);
-        p->begin_decode_call();
     }
 
     stats pager::get_stats() const {

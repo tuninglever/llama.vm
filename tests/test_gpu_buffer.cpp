@@ -28,8 +28,6 @@ int main() {
     setenv("LLAMA_VM_VRAM", "128K", 1);   // window: holds two weights, not all four
     setenv("LLAMA_VM_RAM", "64K", 1);     // capture tier: holds one weight
     setenv("LLAMA_VM_GGML_PAGE_SIZE", "16384", 1);
-    // Use the build-mlx directory for backend libraries
-    setenv("LLAMA_VM_BACKEND_DIR", "/Volumes/work/llama.cpp/build-mlx/bin", 1);
     const std::string swap = "/tmp/llama_vm_test_gpu.swap";
     setenv("LLAMA_VM_SWAP", swap.c_str(), 1);
     std::remove(swap.c_str());

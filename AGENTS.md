@@ -429,6 +429,15 @@ Measured on a 28 GB Qwen3.6-27B Q8_0 (model on the page cache):
    could bypass the per-page path. Profile `bench --pattern seq` with big pages.
 5. **Eviction policy** — LRU only; consider clock/LFU or tensor-affinity (evict whole
    tensors preferentially, which the block-granular eviction already supports cheaply).
+   A per-decode-call "hot set" eviction bias was tried (commit 74fb2a1, 2026-11-03)
+   and **reverted** (2026-11-04): in the wrapper's batch-compute path every tensor
+   faulted during a decode call is "hot", so `evict_one` pass 0 found no victim and
+   the no-swap guard aborted file-mode runs (window << model) with the misleading
+   "only dirty pages remain and no swap file is configured" (the pages are clean
+   file-backed pages). LRU already keeps recently used pages at the MRU end, so the
+   bias bought nothing; any future affinity policy must never block pass-0 clean
+   evictions, and the no-swap throw may only fire when no block is evictable in
+   either pass.
 6. **Swap hardening** — crash recovery (validity bitmap + `fdatasync`) is implemented;
    still handle disk-full on write-back gracefully (currently throws).
 7. **ForthLLM** — Phases 1–3 are done in llama.cpp (the
@@ -518,3 +527,10 @@ the llama.cpp KV-cache API survey, and the phased implementation are in
   shared arena block being reallocated, not a bad load.
 - `stats` (`get_stats()`) exposes faults/evictions/swap counters; `test_gguf` prints them
   on success, which makes regressions (e.g. unexpected swap traffic) visible.
+- **CUDA device indices are not nvidia-smi indices.** The wrapper's `LLAMA_VM_GPU=cudaN`
+  (and the VRAM window's device) select by the CUDA *runtime* device order, which on a
+  multi-GPU box can differ from `nvidia-smi`'s bus ordering. On the P6000/3060 box,
+  runtime `cuda0` = the RTX 3060 (12 GiB), `cuda1` = a P6000 (24 GiB) — the reverse of
+  what the nvidia-smi index suggests. A `cudaMalloc failed: out of memory` on a card
+  that `nvidia-smi` shows as mostly free usually means the window landed on the wrong
+  (smaller) device. Verify with a `cudaGetDeviceProperties` probe, not nvidia-smi.
