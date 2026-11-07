@@ -1,16 +1,16 @@
 diff --git a/common/arg.cpp b/common/arg.cpp
-index e6d6450f4..bfb7302e5 100644
+index 51f226e96..d30a4ebf5 100644
 --- a/common/arg.cpp
 +++ b/common/arg.cpp
-@@ -4,6 +4,7 @@
- #include "chat.h"
+@@ -5,6 +5,7 @@
  #include "common.h"
  #include "download.h"
+ #include "http.h"
 +#include "llama-forthllm.h"
  #include "json-schema-to-grammar.h"
  #include "json.h"
  #include "llama.h"
-@@ -2471,6 +2472,71 @@ common_params_context common_params_parser_init(common_params & params, llama_ex
+@@ -2430,6 +2431,71 @@ common_params_context common_params_parser_init(common_params & params, llama_ex
              params.cache_type_v = kv_cache_type_from_str(value);
          }
      ).set_env("LLAMA_ARG_CACHE_TYPE_V"));
@@ -83,7 +83,7 @@ index e6d6450f4..bfb7302e5 100644
          {"--hellaswag"},
          "compute HellaSwag score over random tasks from datafile supplied with -f",
 diff --git a/common/common.cpp b/common/common.cpp
-index de140a211..ae1379f06 100644
+index a2801b82f..e4ce7065a 100644
 --- a/common/common.cpp
 +++ b/common/common.cpp
 @@ -4,6 +4,7 @@
@@ -94,7 +94,7 @@ index de140a211..ae1379f06 100644
  
  #include "../src/llama-ext.h"
  
-@@ -2216,6 +2217,23 @@ bool common_replay_last_token(struct llama_context * ctx, llama_token last_token
+@@ -2185,6 +2186,23 @@ bool common_replay_last_token(struct llama_context * ctx, llama_token last_token
      return true;
  }
  
@@ -119,7 +119,7 @@ index de140a211..ae1379f06 100644
      const auto rope_type = llama_model_rope_type(llama_get_model(ctx));
      n_pos = rope_type == LLAMA_ROPE_TYPE_MROPE || rope_type == LLAMA_ROPE_TYPE_IMROPE ? GGML_MROPE_SECTIONS : 1;
 diff --git a/common/common.h b/common/common.h
-index ab08d1591..d0351a447 100644
+index 4005275ca..a72e92856 100644
 --- a/common/common.h
 +++ b/common/common.h
 @@ -7,6 +7,7 @@
@@ -713,7 +713,7 @@ index 000000000..9ed24e2f2
 +    return out;
 +}
 diff --git a/src/llama-context.cpp b/src/llama-context.cpp
-index 4141e3c9e..c6c7dc1c7 100644
+index ea20062a6..aff0d69ac 100644
 --- a/src/llama-context.cpp
 +++ b/src/llama-context.cpp
 @@ -2,11 +2,14 @@
@@ -731,7 +731,7 @@ index 4141e3c9e..c6c7dc1c7 100644
  #include "llama-mmap.h"
  #include "llama-model.h"
  #include "llama-moe-cache.h"
-@@ -4547,6 +4550,59 @@ bool llama_memory_can_shift(llama_memory_t mem) {
+@@ -4758,6 +4761,59 @@ bool llama_memory_can_shift(llama_memory_t mem) {
      return mem->get_can_shift();
  }
  
@@ -792,10 +792,10 @@ index 4141e3c9e..c6c7dc1c7 100644
  
  // deprecated
 diff --git a/src/llama-kv-cache.cpp b/src/llama-kv-cache.cpp
-index 00dbf7c94..8be1ea1e0 100644
+index a1ec67e26..7286ee06a 100644
 --- a/src/llama-kv-cache.cpp
 +++ b/src/llama-kv-cache.cpp
-@@ -1186,12 +1186,281 @@ bool llama_kv_cache::get_can_shift() const {
+@@ -1242,12 +1242,281 @@ bool llama_kv_cache::get_can_shift() const {
      if (model.arch == LLM_ARCH_STEP35) {
          return false;
      }
@@ -1079,7 +1079,7 @@ index 00dbf7c94..8be1ea1e0 100644
      const auto & cells = v_cells[seq_to_stream[0]];
  
 diff --git a/src/llama-kv-cache.h b/src/llama-kv-cache.h
-index 60d2e183c..b2d57711d 100644
+index 5aafbebb3..abb93f343 100644
 --- a/src/llama-kv-cache.h
 +++ b/src/llama-kv-cache.h
 @@ -1,6 +1,7 @@
@@ -1090,7 +1090,7 @@ index 60d2e183c..b2d57711d 100644
  #include "llama-graph.h"
  #include "llama-kv-cells.h"
  #include "llama-memory.h"
-@@ -172,6 +173,18 @@ public:
+@@ -174,6 +175,18 @@ public:
      // The stream holding seq_id's cells.
      uint32_t get_stream(llama_seq_id seq_id) const;
  
@@ -1110,10 +1110,10 @@ index 60d2e183c..b2d57711d 100644
      // a cache that mirrors another one (the qwen4exp indexer) must not search for its own cells: two searches agree only by luck
      //   sinfos_out: if set, filled with the layout used; a stream with no cells leaves an empty entry
 diff --git a/tests/CMakeLists.txt b/tests/CMakeLists.txt
-index 6a681afc6..8d8560ada 100644
+index 4224a15ae..62c29900c 100644
 --- a/tests/CMakeLists.txt
 +++ b/tests/CMakeLists.txt
-@@ -184,6 +184,7 @@ if (NOT WIN32 OR NOT BUILD_SHARED_LIBS)
+@@ -186,6 +186,7 @@ if (NOT WIN32 OR NOT BUILD_SHARED_LIBS)
      llama_build_and_test(test-unicode.cpp  LABEL behavior  LINK llama)
      llama_build_and_test(test-sampling.cpp  LABEL behavior  LINK llama)
      llama_build_and_test(test-reasoning-budget.cpp  LABEL behavior)
@@ -1509,10 +1509,10 @@ index 000000000..254ea3da0
 +    return 0;
 +}
 diff --git a/tools/server/server-context.cpp b/tools/server/server-context.cpp
-index 9377e3c17..b5d2847f8 100644
+index 4596e788b..24befaaa1 100644
 --- a/tools/server/server-context.cpp
 +++ b/tools/server/server-context.cpp
-@@ -2186,12 +2186,23 @@ private:
+@@ -2189,12 +2189,23 @@ private:
  
          // if context shifting is disabled, make sure that we don't run out of context
          if (!params_base.ctx_shift && slot.prompt.n_tokens() + 1 >= slot.n_ctx) {
@@ -1541,7 +1541,7 @@ index 9377e3c17..b5d2847f8 100644
          }
  
          // check the limits
-@@ -3758,6 +3769,58 @@ private:
+@@ -3769,6 +3780,58 @@ private:
          });
      }
  
@@ -1600,7 +1600,7 @@ index 9377e3c17..b5d2847f8 100644
      void pre_decode() {
          // apply context-shift if needed
          // TODO: simplify and improve
-@@ -3767,6 +3830,14 @@ private:
+@@ -3778,6 +3841,14 @@ private:
                  return;
              }
              if (slot.state == SLOT_STATE_GENERATING && slot.prompt.n_tokens() + 1 >= slot.n_ctx) {
@@ -1615,7 +1615,7 @@ index 9377e3c17..b5d2847f8 100644
                  if (!params_base.ctx_shift) {
                      // this check is redundant (for good)
                      // we should never get here, because generation should already stopped in process_token()
-@@ -4853,6 +4924,20 @@ private:
+@@ -4869,6 +4940,20 @@ private:
  
                  GGML_ASSERT(slot.task->need_sampling());
  

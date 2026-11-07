@@ -1,5 +1,5 @@
 diff --git a/ggml/include/ggml.h b/ggml/include/ggml.h
-index b188c0bf9..889529f59 100644
+index 5a5ba966b..c3d1141c3 100644
 --- a/ggml/include/ggml.h
 +++ b/ggml/include/ggml.h
 @@ -433,7 +433,11 @@ extern "C" {
@@ -16,10 +16,10 @@ index b188c0bf9..889529f59 100644
  
      // [TAG_GGML_PREC]
 diff --git a/ggml/src/ggml.c b/ggml/src/ggml.c
-index e00f8e23a..f17f4125b 100644
+index f8cf75b3a..fda358044 100644
 --- a/ggml/src/ggml.c
 +++ b/ggml/src/ggml.c
-@@ -698,6 +698,15 @@ static const struct ggml_type_traits type_traits[GGML_TYPE_COUNT] = {
+@@ -697,6 +697,15 @@ static const struct ggml_type_traits type_traits[GGML_TYPE_COUNT] = {
          .to_float                 = (ggml_to_float_t) dequantize_row_q2_0,
          .from_float_ref           = (ggml_from_float_t) quantize_row_q2_0_ref,
      },
