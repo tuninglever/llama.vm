@@ -165,7 +165,7 @@ ctest --test-dir build --output-on-failure
 
 ```bash
 export LD_LIBRARY_PATH=$PWD/build:/path/to/llama.cpp/build-mlx/bin:/opt/homebrew/lib
-export GGML_BACKEND_PATH=$PWD/build/libggml-llamavm-gpu.so
+export GGML_BACKEND_PATH=$PWD/build/libggml-llamavm-gpu.dylib
 export LLAMA_VM_GPU=mlx
 export LLAMA_VM_VRAM=3G
 export LLAMA_VM_GGUF=/path/to/model.gguf
