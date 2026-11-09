@@ -982,6 +982,8 @@ namespace {
             prefix = "Vulkan";
         } else if (base == "cpu") {
             prefix = "CPU";
+        } else if (base == "mlx") {
+            prefix = "MLX";
         }
         if (prefix != nullptr) {
             ggml_backend_dev_t dev = nth_device(prefix, idx);
@@ -993,7 +995,7 @@ namespace {
         }
         if (base != "auto") {
             std::fprintf(stderr, "llama.vm GPU backend: unknown LLAMA_VM_GPU target '%s' (use "
-                                 "auto|hip|cuda|vulkan|cpu, optionally with a device index, eg. cuda1); "
+                                 "auto|hip|cuda|vulkan|cpu|mlx, optionally with a device index, eg. cuda1); "
                                  "falling back to auto\n", target.c_str());
         }
         // auto: the first discrete or integrated GPU
