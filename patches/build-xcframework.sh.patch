@@ -1,0 +1,15 @@
+diff --git a/build-xcframework.sh b/build-xcframework.sh
+index e2a2684cc..929b9199a 100755
+--- a/build-xcframework.sh
++++ b/build-xcframework.sh
+@@ -59,8 +59,8 @@ for b in "${BUILDS[@]}"; do
+     fi
+ done
+ 
+-COMMON_C_FLAGS="-Wno-macro-redefined -Wno-shorten-64-to-32 -Wno-unused-command-line-argument -g"
+-COMMON_CXX_FLAGS="-Wno-macro-redefined -Wno-shorten-64-to-32 -Wno-unused-command-line-argument -g"
++COMMON_C_FLAGS="-Wno-macro-redefined -Wno-shorten-64-to-32 -Wno-unused-command-line-argument -g -Wno-variadic-macro-arguments-omitted-Wno -nullability-extension"
++COMMON_CXX_FLAGS="-Wno-macro-redefined -Wno-shorten-64-to-32 -Wno-unused-command-line-argument -g -Wno-variadic-macro-arguments-omitted-Wno -nullability-extension"
+ 
+ # Common options for all builds
+ COMMON_CMAKE_ARGS=(

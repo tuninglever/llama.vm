@@ -56,6 +56,7 @@ apply_patch() {
     fi
 }
 
+apply_patch "${SCRIPT_DIR}/build-xcframework.sh.patch"
 apply_patch "${SCRIPT_DIR}/ggml-type66-kimi-q1-0-stub.patch"
 
 if [[ "${WITH_FORTHLLM}" == "1" ]]; then
