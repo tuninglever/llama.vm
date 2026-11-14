@@ -26,6 +26,10 @@ a page table maps a flat virtual address space (one entry per tensor) to pages, 
 lazily faulted into a RAM and/or VRAM tier, cached with an LRU policy, and — for modified
 data — swapped to a swap file. A CLI tool (`llama-vm`) exercises and benchmarks the pager.
 
+**Documentation:** [README](README.md) (quick start), [BUILD](BUILD.md) (platform builds),
+[Architecture](docs/architecture.md), [Testing](docs/testing.md), [ForthLLM](docs/forthllm.md),
+[Debugging](docs/debugging.md).
+
 Status against the objective: the pager engine is complete and validated standalone
 (faults/LRU/swap/prefetch, both tiers — the VRAM tier on a real ROCm/HIP APU — sharded
 GGUF up to ~434 GB / 2573 tensors / 11 shards; `test_pager`, `test_gguf`,
@@ -59,151 +63,30 @@ re-run the apply script. See
 See *Next steps*.
 
 ## Repository layout
-```
-include/llama_vm/llama_vm.h   public API (config, pager, tensor_info, page_info, stats,
-                                attach_host_region, tier_base, plan_capacity)
-src/arena.h                   per-tier fixed-size allocator (first-fit, 4 KiB aligned)
-src/pager-impl.h              pager internals (page table, LRU lists, prefetch, swap bitmap)
-src/pager.cpp                 paging engine: faults, eviction, swap (crash-recoverable),
-                               read/write, host regions
-src/vram.{h,cpp}              VRAM tier backend (ggml buffer; hip/cuda/vulkan/cpu/auto)
-src/gguf.cpp                  GGUF backend: tensors -> regions (single-file + sharded/split)
-src/ggml_buffer.{h,cpp}       ggml buffer backend: a host buffer_type backed by a pager
-src/ggml_buffer_gpu.cpp       GPU weight buffer (LLAMA_VM_GPU) + wrapper compute backend
-src/ggml_backend_shim.cpp     dlopen shim -> libggml-llamavm-cpu.so (ggml_backend_init)
-src/ggml_backend_gpu_shim.cpp dlopen shim -> libggml-llamavm-gpu.so (wrapper backend)
-src/vm_env.h                  K/M/G size parsing + env-var size helpers (budgets)
-tests/                        test_arena, test_pager, test_concurrent, test_ggml_buffer,
-                                 test_captured, test_gpu_buffer, test_llama_integration,
-                                 test_gguf, test_vram (ctest)
-tools/llama-vm.cpp            CLI: info / verify / bench / pages / plan / tiered / demo
-include/forthllm/, src/forthllm.cpp, src/squeezer.cpp, src/bwt.cpp, src/fm_index.cpp,
-                                src/jl_projector.cpp   ForthLLM model-agnostic math
-                                (summarize/stack/squeezer/BWT/JL — a faithful port of
-                                the tested llama.cpp engine, no ggml; the KV-cache
-                                surgery + C API live in llama.cpp, see below)
-design.md, planning.md        original design and roadmap
-forthllm-design.md            ForthLLM design (examples are aspirational — the flag
-                                set is implemented in llama.cpp but the stored-
-                                representation options are not; see status note)
-llama-server-forthllm-investigation.md
-                              2026-10-30 investigation: --llama-vm-*/--forthllm-* flag
-                                failure, mechanism, and the ForthLLM implementation
-                                (Phases 1-3 done, validated on Qwen3.8-27B)
-patches/llama-cpp-forthllm-kv-compaction.patch
-                              the ForthLLM llama.cpp feature patch (flags + engine +
-                                KV-cache compaction + server hooks), validated E2E
-```
+
+See [Architecture](docs/architecture.md) for the complete repository layout and detailed
+component descriptions.
+
+Key directories:
+- `src/` — pager engine, buffer backends, VRAM tier, GGUF backend
+- `include/` — public API (`llama_vm.h`) and ForthLLM library
+- `tests/` — ctest suite
+- `tools/llama-vm.cpp` — CLI tool
+- `patches/` — llama.cpp patches
+- `docs/` — documentation (architecture, testing, ForthLLM, debugging)
 
 ## Architecture
-- **Page table.** Every attached region (each GGUF tensor is one region) is split into
-  fixed-size pages (default 4 MiB; the last page of a tensor may be partial). Pages are the
-  unit of faulting, caching, and eviction. `page_starts` maps virtual addresses to pages.
-- **Tiers.** RAM and VRAM are independent caches, each backed by one aligned buffer and an
-  `arena` allocator that hands out per-page slices. A page may be resident in both tiers;
-  the most recently modified tier is authoritative, clean pages fall back to the source
-  file. VRAM is a ggml backend buffer; `vram_backend = "cpu"` gives a plain host buffer,
-  which lets the paging logic be tested without a GPU.
-- **LRU + smart eviction.** Each tier keeps an LRU list (MRU at front). When space is
-  needed, the pager evicts the least recently used victim, preferring victims that need no
-  swap write-back and deferring dirty last-copy pages to a second pass.
-- **Eviction unit is the arena block.** A `tensor_data()` call gathers a whole tensor into
-  *one* arena allocation shared by its pages (this is what makes the returned pointer
-  contiguous). Consequently eviction and the gather free-loop operate on the whole block:
-  every resident page in the block is detached, and each dirty last-copy page in the block
-  is written back to the swap file first. Pinned pages (or pinned co-tenants in the same
-  block) are never evicted. Do not "fix" this to per-page frees — freeing one page's
-  offset frees the shared block and silently dangles the co-resident pages (this bug was
-  found by corrupted-data test failures).
-- **Swap.** Optional swap file, one slot per page. Only dirty pages whose last copy is
-  being evicted are written back; re-faults prefer the swap slot over the source file.
-- **Safe access.** `read()`/`write()` copy through the pager and are never invalidated by
-  eviction; `resolve_page()`/`tensor_data()` return direct pointers that stay valid only
-  until the page is evicted by a later operation.
-- **Prefetch.** Optional background worker (`cfg.prefetch`) that faults in the next
-  sequential page on a fault, plus explicit work: `prefetch_range()` enqueues a page
-  range and `prefetch_tensor()` enqueues a whole tensor, staged as one contiguous arena
-  block so a later `tensor_data()` finds the pages already contiguous and reuses the
-  block without copying (the gather's fast path). `cancel_prefetch()` drops pending work.
-  Best effort: resident pages are skipped; when the RAM tier is full the worker makes
-  room by evicting pages that are also resident in the other tier (staging duplicates —
-  the other copy remains, so no swap is needed); the VRAM window is never evicted for a
-  prefetch.
-- **Host regions.** `attach_host_region()` maps a region with *no* backing file (data is
-  written in via `write()` / the buffer's `set_tensor`). Host pages are never evicted and
-  map linearly: a page's data lives at `base + virtual_offset`, so the RAM tier base is a
-  plain linear buffer. This is the basis for the ggml buffer backend.
-- **Captured regions.** `attach_captured_region()` maps a region with *no* backing file
-  whose data is written in via `write()` (eg. weights captured by the GPU buffer at load
-  time). Unlike host regions its pages are **paged like file-backed pages**: LRU-evicted,
-  and a dirty last-copy page is swapped out — so a captured region larger than the tiers
-  needs a swap file. Pages carry a `written` flag; faulting, reading, or `tensor_data`-ing
-  an unwritten page throws (the data does not exist anywhere).
-- **Sharded GGUF.** `from_gguf` handles split models (the `gguf.split.count` /
-  `gguf.split_no` keys). The first split holds the full metadata (arch/name) plus its own
-  tensors; every other split lists only the tensors it stores, with offsets relative to its
-  own data section. `from_gguf` requires the first split, derives the sibling paths with the
-  llama.cpp convention (`<prefix>-NNNNN-of-MMMMM.gguf`), and attaches each shard's tensors
-  backed by that shard's file (the pager already supports one file per region, so no pager
-  change was needed). Each `tensor_info::file` records the shard, which is how the CLI and
-  `test_gguf` verify a tensor against its own shard.
-- **ggml buffer backend.** `src/ggml_buffer.cpp` exposes the pager as a ggml
-  `buffer_type` ("LLAMA_VM", `is_host`). A buffer's memory is the pager's RAM tier;
-  `set_tensor`/`get_tensor` route through `pager::write`/`read` at `base + offset`, and
-  `cpy_tensor`/`clear` use direct host access. The buffer owns its pager (freed by
-  `free_buffer`). It is registered as a memory-only backend (one device, no compute) and
-  is loadable by llama.cpp either by linking `libllama_vm` (`llama_vm_ggml_buft()`) or
-  dlopen-ing `libggml-llamavm-cpu.so` (`ggml_backend_init`). The operator can cap the RAM
-  tier with `LLAMA_VM_RAM`; a host buffer cannot page, so a budget below the model size is
-  rejected (the buffer alloc fails) instead of silently malloc'ing the model.
-- **GPU weight buffer (`LLAMA_VM_GPU`).** `src/ggml_buffer_gpu.cpp` exposes a
-  *non-host* `buffer_type` whose base is the pager's VRAM tier — a user-capped **window**
-  (`LLAMA_VM_VRAM`, required), not the whole model. Two data modes: *capture* (default) —
-  the loader's `set_tensor` writes are captured into per-tensor captured regions in a
-  user-capped RAM tier (`LLAMA_VM_RAM`, default: the whole model) and swapped out
-  (`LLAMA_VM_SWAP`) as it fills — a RAM budget below the model size *requires* a swap
-  file; *file* (`LLAMA_VM_GGUF=<model>`) — the pager is built from the GGUF file, the
-   loader's writes are ignored, and weights fault straight from the file into the window at
-   compute time (no RAM tier or swap needed for the weights). On a host-writable window
-   (an iGPU under the HMM, detected via the device type; `LLAMA_VM_VRAM_DIRECT_IO=0`
-   overrides) the pager reads the file **straight into the window** — one pass instead of
-   file → scratch → device — and the RAM tier defaults to 0; on a discrete GPU the RAM
-   tier (default: one window) stages the next batch's weights so a fault is a one-pass
-   RAM → VRAM copy. The wrapper's prefetch: after launching a batch's compute it enqueues
-   the next batch's weight tensors (the tensors whose pages follow the batch in the
-   virtual address space, up to one window's worth) for the pager's background worker,
-   which stages them as contiguous blocks into the window as space frees up. A wrapper ggml backend (one
-  registry, two devices: a compute device presenting the inner backend and a memory-only
-  device for buft name resolution) intercepts `graph_compute` and splits the graph into
-  **batches**: the longest run of consecutive ops whose unique weight tensors can be
-  resident in the window at once. For each batch it faults those weights in
-  (`tensor_data`, pinning each as it goes so a later fault cannot evict an earlier
-  member), re-points `tensor->data` at the contiguous window blocks, computes the batch
-  as one real graph on the inner backend, and synchronizes once. View/reshape/permute/
-  transpose/empty/none nodes are skipped only as single-node batches (the inner backend
-  hangs on them as single-node graphs); inside a multi-node batch they are fine. The
-  inner compute backend is chosen by `LLAMA_VM_GPU=auto|hip|cuda|vulkan|cpu`, optionally
-  with a device index within the backend (`cuda1` = the second CUDA device, registration
-  order); the VRAM window is allocated on that same physical device. A weight is
-  only resident while its batch runs, so the window holds one batch's weights (plus
-  nothing else: activations live in the inner buft). `test_gpu_buffer` exercises the
-  buffer + wrapper (dedupe, pin boundary, cross-batch reuse) with `vram_backend = "cpu"`;
-  the dlopen-able form is `libggml-llamavm-gpu.so`.
-- **llama.cpp integration.** Weights are routed to the buffer via
-  `llama_model_params.tensor_buft_overrides` (a `{regex, buft}` list; our buft is used
-  verbatim, bypassing the `supports_op` gate). Because the host buffer is `is_host`, the
-  loader writes GGUF bytes straight into `tensor->data` (= `base + offset`) and CPU
-  kernels read `tensor->data` directly — so it must be a contiguous in-RAM region that
-  holds the whole model. **Load with `LLAMA_LOAD_MODE_NONE`**: with mmap the loader swaps
-  a host `buffer_type` for the stock CPU buft. `test_llama_integration` exercises this
-  end-to-end. For a model larger than RAM, use the `LLAMA_VM_GPU` buffer instead: it is
-  non-host, so the loader's writes are captured (or ignored in file mode) and the wrapper
-  backend faults weights into the VRAM window at compute time.
-- **Capacity governor.** `plan_capacity(model_size, avail_ram, avail_vram)` sizes the
-   tiers from the model: RAM is filled first, then VRAM with the model's remainder; the
-   total is capped at the capacity the model needs (the arena rounds each page's slice up
-   to 4 KiB, so that is `model_size` rounded up to 4 KiB). `fits` reports whether the whole
-   model can be cached. `llama-vm plan` and the unit tests exercise it.
+
+See [docs/architecture.md](docs/architecture.md) for the complete architecture, including
+page table, tiers, LRU eviction, swap, prefetch, host/captured regions, sharded GGUF,
+buffer backends, llama.cpp integration, capacity governor, and API constraints.
+
+Key concepts:
+- **Page table** maps virtual addresses (one entry per tensor) to pages
+- **Tiers** are RAM and VRAM caches with LRU eviction
+- **Swap** handles dirty page write-back
+- **Host buffer** (`LLAMA_VM`) must hold the whole model in RAM
+- **GPU weight buffer** (`LLAMA_VM_GPU`) demand-pages weights into a user-capped VRAM window
 
 ## Invariants and API constraints (read before changing)
 - `tensor_data(name, t)` requires the *entire tensor* to fit in tier `t` at once — the
@@ -222,324 +105,60 @@ patches/llama-cpp-forthllm-kv-compaction.patch
   swap file** (a dirty last-copy page with nowhere to go throws).
 
 ## Build and test
-Requires a llama.cpp tree with prebuilt ggml libraries, passed with
-`-DLlamaVM_LLAMA_CPP_DIR=/path/to/llama.cpp`.
 
-Note: llama.cpp may need a small **load-only stub for ggml type 66**
-(`GGML_TYPE_KIMI_Q1_0`, see `patches/ggml-type66-kimi-q1-0-stub.patch`). Kimi-K3's
-`UD-Q1_0` quant uses type 66, which is not in upstream ggml; the stub gives it the measured
-19/128 bytes/elem so GGUF files using it parse and page correctly (no dequant kernels).
-Rebuild the ggml libs after touching it: `cmake --build <llama.cpp>/<build-dir> --target ggml-base ggml -j` (your platform's build dir: `build`, `build-hip`, `build-cuda`, `build-mlx`).
+See [BUILD.md](BUILD.md) for platform-specific build instructions (ROCm, CUDA, MLX) and
+[docs/testing.md](docs/testing.md) for the full test suite and CLI tools.
 
+Quick build:
 ```sh
-cmake -S . -B build -DLlamaVM_LLAMA_CPP_DIR=/path/to/llama.cpp
+# Apply patches
+patches/apply-llama.cpp-patches.sh /path/to/llama.cpp
+
+# Build llama.cpp (platform-specific)
+cd /path/to/llama.cpp && cmake -S . -B build-<platform> -DGGML_<BACKEND>=ON -DCMAKE_BUILD_TYPE=Release
+cmake --build build-<platform> --target ggml-<backend> -j
+
+# Build llama.vm
+cd /path/to/llama.vm
+cmake -S . -B build -DLlamaVM_LLAMA_CPP_DIR=/path/to/llama.cpp -DCMAKE_BUILD_TYPE=Release
 cmake --build build -j
 
-# unit tests (test_gguf needs a model; set LLAMA_VM_TEST_MODEL or it auto-skips)
+# Run tests
 ctest --test-dir build --output-on-failure
-
-# individual runs
-build/test_arena
-build/test_pager
-build/test_concurrent
-build/test_ggml_buffer
-build/test_captured
-build/test_gpu_buffer             # GPU buffer + wrapper backend, VRAM tier on a host buffer
-build/test_llama_integration      # needs libllama + a model (LLAMA_VM_TEST_MODEL)
-LLAMA_VM_TEST_VRAM=1 LLAMA_VM_VRAM_BACKEND=cpu build/test_vram
-LLAMA_VM_TEST_MODEL=/path/to/model.gguf build/test_gguf
-
-# CLI
-build/llama-vm info   <model.gguf> [--ram 64M] [--vram 32M] [--page 4M] [--backend cpu]
-build/llama-vm verify <model.gguf> [--ram 16M] [--vram 64M] [--tensor NAME]
-build/llama-vm bench  <model.gguf> [--ram 32M] [--pattern seq|rand] [--pass N] [--swap FILE]
-build/llama-vm plan   <model.gguf> --ram AVAIL_RAM --vram AVAIL_VRAM   # capacity plan (here --ram/--vram are available memory)
-build/llama-vm tiered <model.gguf> --ram 1G --vram 1G --backend hip    # exercise RAM + VRAM + file + tier copies, then verify every page
-build/llama-vm demo                     # self-contained paging/swap demo, no model needed
 ```
 
-Size arguments accept K/M/G suffixes. `--backend cpu` runs the VRAM tier on a host buffer
-(useful for testing without a GPU). `tiered` needs both `--ram` and `--vram`; set the
-capacities below the model size to force LRU evictions and re-faults from the file.
+## Performance findings
 
-### Using the VRAM tier on a real GPU (ROCm/HIP)
-
-The pager loads the VRAM backend **at runtime** via ggml's backend registry
-(`vram.cpp`), so it does not need to be rebuilt for a GPU — it just needs a
-`libggml-hip.so` on disk:
-
-```sh
-# 1. build the HIP backend (separate tree so the CPU build stays intact)
-cmake -S <llama.cpp> -B <llama.cpp>/build-hip -DGGML_HIP=ON -DCMAKE_BUILD_TYPE=Release
-cmake --build <llama.cpp>/build-hip --target ggml-hip -j
-
-# 2. point the pager at that bin dir
-export LLAMA_VM_BACKEND_DIR=<llama.cpp>/build-hip/bin
-build/llama-vm tiered <model.gguf> --ram 2G --vram 2G --backend hip
-```
-
-Two gotchas (both now handled, see `src/vram.cpp`):
-- `ggml_backend_init_by_name` matches a **device** name (`ROCm0`), not the bare backend
-  name, and a HIP build registers its device as **ROCm** (GGML_CUDA_NAME). `vram.cpp`
-  enumerates devices and matches by prefix, so `--backend hip` finds it.
-- The registry loader only accepts a backend .so that exports the generic
-  `ggml_backend_init` entry, which requires building with **GGML_BACKEND_DL=ON**. A
-  backend built without it (the default) exports the CUDA-named `ggml_backend_cuda_reg`;
-  in that case a tiny shim providing `ggml_backend_init`/`ggml_backend_score` that
-  delegates to `ggml_backend_cuda_reg` is enough (the loader also requires the file to
-  match `libggml-hip-*.so`).
-
-The ggml buffer backend builds into `libllama_vm.so` (used by `test_ggml_buffer`) and as
-the standalone dlopen-able `build/libggml-llamavm-cpu.so`. llama.cpp can load the latter
-via `GGML_BACKEND_PATH=.../libggml-llamavm-cpu.so` or `ggml_backend_load()`.
-
-### Using the GPU weight buffer with llama.cpp (demand paging, model > VRAM)
-
-The `LLAMA_VM_GPU` buffer + wrapper backend run a model **larger than the VRAM window**
-through llama.cpp (see the *GPU weight buffer* architecture entry):
-
-```sh
-export LD_LIBRARY_PATH=$PWD/build:/usr/local/lib
-export GGML_BACKEND_PATH=$PWD/build/libggml-llamavm-gpu.so
-export GGML_CUDA_DISABLE_GRAPHS=1
-export LLAMA_VM_GPU=hip          # inner compute backend (auto|hip|cuda|vulkan|cpu,
-                                 # optionally with a device index: cuda1 = 2nd CUDA device)
-export LLAMA_VM_VRAM=3G          # the VRAM window: one batch's weights
-export LLAMA_VM_GGUF=/path/to/model.gguf    # file mode: fault weights from the model file
-# capture mode instead: unset LLAMA_VM_GGUF; set LLAMA_VM_RAM=<budget> and, if the
-# budget is below the model size, LLAMA_VM_SWAP=/path/to/swap-file
-llama-cli -m /path/to/model.gguf --device LLAMA_VM_GPU -ot '.*=LLAMA_VM_GPU' -ngl 99 \
-          --load-mode none --n-predict 1 --prompt "Hi" --temp 0 --single-turn
-# or the server (the objective's acceptance path):
-llama-server -m /path/to/model.gguf --device LLAMA_VM_GPU -ot '.*=LLAMA_VM_GPU' -ngl 99 \
-             --load-mode none --port 8123
-curl -s http://127.0.0.1:8123/completion \
-     -d '{"prompt":"Hi","n_predict":1,"temperature":0,"stream":false}'
-```
-
-**Use `--single-turn` with llama-cli**: without it, after `--n-predict` is satisfied
-llama-cli enters the interactive loop; with stdin at EOF (background/nohup runs) it
-busy-loops printing the `> ` prompt forever — see *Debugging notes*.
-
-`LLAMA_VM_DEBUG=1` writes a per-batch heartbeat (with pager faults/evictions and
-per-batch fault/compute times) to `/tmp/llamavm_debug.log`. Validated on a 28 GB
-Qwen3.6-27B Q8_0 on a Radeon 890M APU:
-- **3 GiB window (model >> budget):** `llama-cli` completes reproducibly in ~15 s total
-  (fault phase ~7.8 s / compute ~1.8 s over 4 graphs; faults=30760 / evicts=30153), and
-  `llama-server` completes a request in 2.4 s. The fault phase is at the machine's memory
-  bandwidth ceiling (~16 GiB/s): every graph re-reads the whole 28 GB working set from
-  the page cache, and on the iGPU the pager reads it straight into the window in one
-  pass.
-- **28 G window (model fits the budget):** the whole model faults in **once**
-  (faults=7683, then zero re-faults — later graphs hit the gather's fast path), and the
-  prompt runs at 12.8 t/s vs 2.3 t/s with the 3 GiB window. When the operator's budget
-  covers the model, paging disappears; when it does not, the per-graph re-read is the
-  floor.
-
-Also validated on a real **MoE** model: Qwen3.8-27B (16.4 GB, `qwen35` arch, fused
-`attn_qkv` + per-head views) runs end-to-end through the GPU buffer with a **1 GiB
-window** (16x smaller than the model) — `llama-cli --device LLAMA_VM_GPU -ot
-'.*=LLAMA_VM_GPU' -ngl 99 --n-predict 8` completes and exits normally. The wrapper's
-fault path is exercised for both whole tensors (`attn_qkv`, `token_embd`) and views
-(`attn_q/k/v` are slices of `attn_qkv`, faulted via `tensor_data_range`). Two
-operational notes from this run:
-
-- **The window must be >= the largest non-view tensor.** `token_embd.weight` (715 MB
-  here) is a plain tensor faulted whole via `tensor_data`, so a window below it throws
-  `tier capacity is too small for this allocation`. A 512 MiB window fails on this
-  model; 1 GiB works. Views (MoE expert slices, per-head QKV) are faulted as slices and
-  only need their slice, but any single non-view tensor is a hard floor on the window.
-- **Generation is slow at a tiny window on an APU.** At a 1 GiB window the model
-  re-reads its whole 16.4 GB working set from the page cache every token (0.1 t/s; the
-  window competes with the page cache for the shared HMM memory). This is the expected
-  bandwidth-bound re-read, not a correctness issue — an earlier "hang" was just this
-  slowness.
-
-Also validated on a **discrete CUDA** GPU (Quadro P6000, selected with
-`LLAMA_VM_GPU=cuda1`) with a sharded 155 GB MoE model: DeepSeek-V4-Flash
-`UD-Q4_K_XL` (5 shards, `deepseek4` arch, MXFP4 weights, MLA) through a **3 GiB
-window** (52x smaller than the model) — `llama-server -c 4096` starts and a
-completion returns coherent text (4 tokens in ~8 min). Two notes from this run:
-
-- **Pass an explicit `-c`.** The model advertises a 1M context; without `-c` the
-  server sized a 21.5 GiB KV cache and OOM'd on the 24 GB card (the window and the
-  other tenant's allocation leave ~6.9 GiB). `-c 4096` gives a ~2.2 GiB KV cache.
-- **The first completion is disk-bound.** The 155 GB working set does not fit in the
-  page cache (62 GiB RAM), so every graph re-reads it from the NVMe (~5.8 GiB/s
-  sequential; effective fault rate lower on 4 MiB reads). Expected, not a bug.
-
-## Performance findings (Radeon 890M APU, iGPU)
-
-Measured on a 28 GB Qwen3.6-27B Q8_0 (model on the page cache):
-- The APU's "VRAM" (47 GiB) is a carve-out of the 91 GiB system RAM (HMM): the pager's
-  window (`hipMalloc`) and the page cache compete for the **same** physical memory.
-- The host copy ceiling is ~15.6 GiB/s (warm `memcpy`); `pread` from the page cache is
-  ~11–13 GiB/s. The fault phase runs at this ceiling — it is bandwidth-bound, not
-  overhead-bound.
-- **Window far below the model (3 GiB):** every forward pass re-reads the whole working
-  set from the page cache. The fault phase is at the memory-bandwidth floor, and
-  background prefetch cannot beat it: the window is full during compute, so staging
-  races the wrapper's own faults (each page is read exactly once, by whichever thread
-  gets there first).
-- **Window covers the model (28 G):** the model faults in once; later passes hit the
-  gather's fast path with zero re-faults.
-- **The operator's budget is the lever.** When the window covers the model, paging
-  disappears; when it does not, the per-pass re-read at the memory-bandwidth floor is the
-  cost. On an iGPU, size the window so the model still fits in the page cache
-  (`window + model <= available RAM`) — if the model is on a slow disk, spilling it out
-  of the page cache makes faults ~100x slower, so a small window that keeps the model
-  cached is essential, not a compromise.
+On a 28 GB Qwen3.6-27B Q8_0 on a Radeon 890M APU (iGPU):
+- **Window far below the model (3 GiB):** every forward pass re-reads the whole working set from the page cache. The fault phase is at the memory-bandwidth floor (~16 GiB/s).
+- **Window covers the model (28 G):** the model faults in once; later passes hit the gather's fast path with zero re-faults.
+- **The operator's budget is the lever.** When the window covers the model, paging disappears; when it does not, the per-pass re-read at the memory-bandwidth floor is the cost.
 
 ## Conventions
-- C++17, 4-space indent, snake_case members/functions, no exceptions in hot paths
-  (errors throw `std::runtime_error` from API boundaries).
-- No comments unless they explain *why*; keep the public API in `llama_vm.h` small and
-  documented (see the pointer-validity notes on `resolve_page`/`tensor_data`).
-- Keep tests deterministic and self-contained; `test_gguf` auto-skips when no model is
-  available, so the suite stays green on machines without big models.
+- C++17, 4-space indent, snake_case members/functions
+- No exceptions in hot paths; errors throw `std::runtime_error` from API boundaries
+- No comments unless they explain *why*
+- Keep tests deterministic and self-contained
 
 ## Next steps
-1. **Performance: cut the bytes moved.** The fault traffic is now at the machine's
-   memory-bandwidth floor: every graph re-reads the whole working set from the page
-   cache (28 GB per 3655-op graph on the 28 GB / 3 GiB fixture; the fault phase runs at
-   ~16 GiB/s ≈ the memcpy ceiling), and the next-batch prefetch + one-pass file → window
-   read (iGPU HMM) are already in place. Remaining levers: a window that covers the
-   model (re-faults drop to zero — validated above), fewer graphs per generation
-   (llama.cpp / MTP side), and the file-mode load phase (the loader still reads the whole
-   model out of the GGUF and the buffer discards it — a llama.cpp hook to skip
-   `set_tensor` for bufts that ignore writes would save one full model read per load).
-2. **User-dictated RAM+VRAM budget in the llama.cpp path.** The budgets are read from
-   the `LLAMA_VM_*` env vars (`LLAMA_VM_RAM`, `LLAMA_VM_VRAM`, `LLAMA_VM_SWAP`,
-   `LLAMA_VM_GGUF`); the host buffer rejects a sub-model budget, the GPU buffer pages at
-   the budget. The `--llama-vm-*` CLI flags are **not** in the current llama.cpp build —
-   either add them to `common_params_parse` (map onto the env vars, flag overrides env)
-   or keep using env vars. Size the tiers via `plan_capacity`.
-3. **CPU constraint (why the GPU path is primary).** A *host* buffer must hold the whole
-   model in RAM: the CPU reads weights via a direct `tensor->data` host pointer
-   (`ggml/src/ggml-cpu/ggml-cpu.c`, e.g. MUL_MAT reads `src1->data`), and the CPU backend
-   accepts a buffer type only if it is host or a CPU-extra type
-   (`ggml_backend_cpu_device_supports_buft`); every CPU-extra type (repack, AMX, KleidiAI)
-   is itself a *host* buffer read via `tensor->data`. There is no fault-in path for CPU
-   weight reads, so a model larger than RAM on CPU relies on the OS page cache
-   (`--load-mode mmap`) — the baseline llama.cpp already provides. Do not try to "fix"
-   this by making the host buffer smaller; it dangles. The pager's CPU value is
-   standalone (`test_pager`, `test_gguf`, `llama-vm bench`) and as the RAM tier of the
-   GPU path (item 1).
-4. **Performance** — `read()` copies page-by-page through `scratch`; large sequential reads
-   could bypass the per-page path. Profile `bench --pattern seq` with big pages.
-5. **Eviction policy** — LRU only; consider clock/LFU or tensor-affinity (evict whole
-   tensors preferentially, which the block-granular eviction already supports cheaply).
-   A per-decode-call "hot set" eviction bias was tried (commit 74fb2a1, 2026-11-03)
-   and **reverted** (2026-11-04): in the wrapper's batch-compute path every tensor
-   faulted during a decode call is "hot", so `evict_one` pass 0 found no victim and
-   the no-swap guard aborted file-mode runs (window << model) with the misleading
-   "only dirty pages remain and no swap file is configured" (the pages are clean
-   file-backed pages). LRU already keeps recently used pages at the MRU end, so the
-   bias bought nothing; any future affinity policy must never block pass-0 clean
-   evictions, and the no-swap throw may only fire when no block is evictable in
-   either pass.
-6. **Swap hardening** — crash recovery (validity bitmap + `fdatasync`) is implemented;
-   still handle disk-full on write-back gracefully (currently throws).
-7. **ForthLLM** — Phases 1–3 are done in llama.cpp (the
-   `--forthllm-*` flags, the summarization engine, `llama_kv_cache::forthllm_compact`
-   incl. hybrid/IMROPE support, and the server's post-prefill, context-limit-stop,
-   and pre-context-shift hooks); validated end-to-end on Qwen3.8-27B (2196-token
-   prompt → 180 cells, coherent answer). The patch is
-    `patches/llama-cpp-forthllm-kv-compaction.patch`; it is applied to the
-    `/work/llama.cpp` clone (upstream `45b6604b2`, 2026-11-05) and re-validated
-    E2E (8 chunks compacted, 1008 cells freed, coherent "Paris" answer).
-   Phase 4a is done: this repo's `include/forthllm/` + `src/forthllm.cpp` (+
-   `squeezer`/`bwt`/`fm_index`/`jl_projector`) scaffold is now a faithful port of the
-   tested llama.cpp engine (real summarize/stack/squeezer/BWT, no more `sin()`
-   summaries or broken BWT invert; `test_forthllm` + `test_squeezer` pass).
-   Phase 4b is done: `--forthllm-max-stack-depth` + `--forthllm-eviction` now take
-   effect in the compaction (the oldest chunks beyond the keep limit are dropped from
-   the context; validated E2E on Qwen3.8-27B). The `squeezer`/`jl_dim` are carried but
-   attach to state save/load (future). Remaining (Phase 4c): add MLA (DeepSeek-V4)
-   support — note DSV4's cache is a raw-SWA + compressed-block + ring-state structure,
-   not a plain MLA cache, so 4c needs its own design pass. See
-   `llama-server-forthllm-investigation.md` (Phase 4 handoff).
 
-Done since the last revision: concurrency stress test (`test_concurrent`), swap
-crash-recovery (`fdatasync` + validity bitmap), host-region support, the ggml buffer
-backend (`test_ggml_buffer`), llama.cpp integration — the buffer works as a weight
-buffer via `tensor_buft_overrides` (`test_llama_integration`) — the capacity governor
-(`plan_capacity`, `llama-vm plan`), real-GPU (ROCm/HIP) validation of the VRAM tier —
-`test_vram` and the new `llama-vm tiered` command both run a model larger than the tiers
-through RAM + VRAM + file and verify every page (27.7 GiB Qwen on a Radeon 890M APU) —
-**sharded GGUF support** (`from_gguf` loads split models, verified on DeepSeek-V4
-81 GiB / 3 shards and Kimi-K3 434 GiB / 11 shards) plus a **load-only ggml type-66 stub**
-for the Kimi-K3 `UD-Q1_0` quant (see `patches/ggml-type66-kimi-q1-0-stub.patch`) — and
-the **GPU weight buffer** (`LLAMA_VM_GPU`) that demand-pages weights into a user-capped
-VRAM window at compute time. With batch compute (fault a batch of ops' weights, compute
-as one real graph), `llama-server` (HIP) ran a 28 GB Qwen3.6-27B Q8_0 through a 3 GiB
-window — a completion took 2.4 s, pager stats faults=30760 / evicts=30153, and repeated
-runs complete reproducibly. The fault phase is at the machine's memory-bandwidth floor
-(~16 GiB/s): every graph re-reads the whole 28 GB working set from the page cache, and
-on the iGPU the pager reads it straight into the window in one pass. When the operator's
-window covers the model, the whole model faults in once and re-faults drop to zero (28 G
-window: faults=7683, 12.8 t/s vs 2.3 t/s at the 3 GiB window).
+1. **Performance:** Cut the bytes moved — the fault traffic is at the memory-bandwidth floor. Remaining levers: window that covers the model, fewer graphs per generation, file-mode load phase optimization.
+2. **User-dictated budget in llama.cpp path:** The `--llama-vm-*` CLI flags are not in the current llama.cpp build — either add them to `common_params_parse` or keep using env vars.
+3. **CPU constraint:** A host buffer must hold the whole model in RAM. The pager's CPU value is standalone and as the RAM tier of the GPU path.
+4. **Performance:** `read()` copies page-by-page through `scratch`; large sequential reads could bypass the per-page path.
+5. **Eviction policy:** LRU only; consider clock/LFU or tensor-affinity.
+6. **Swap hardening:** Handle disk-full on write-back gracefully.
+7. **ForthLLM Phase 4c:** Add MLA (DeepSeek-V4) support — requires its own design pass.
 
-**MLX backend** (complete): Added MLX support as a compute backend for llama.vm.
-The ggml-mlx backend (`llama.cpp/ggml/src/ggml-mlx/`) implements the ggml backend API
-using the MLX C++ API for Apple Silicon GPUs. The backend supports core LLM operations:
-MUL_MAT, SOFT_MAX, ADD, MUL, DIV, RMS_NORM, SIN, COS, LOG, and unary operations
-(SILU, EXP, TANH, RELU, GELU, SIGMOID). The backend is registered with ggml's
-backend registry and can be selected via `LLAMA_VM_GPU=mlx` or `--backend mlx`.
-The pager's VRAM tier now supports MLX as a backend option, enabling demand-paged
-model execution on Apple Silicon with MLX as the compute backend. Validated on an
-Apple M4 Pro with the Starling-LM-7B model. See BUILD.md for build instructions.
-
-**ForthLLM** (context/KV compression — implemented in llama.cpp, 2026-10-30): the
-`--forthllm-*` llama-server flags now parse (`common/arg.cpp`), and the real engine —
-chunked KV-row summarization (mean/last/attention, per-head weights), `llama_kv_cache::
-forthllm_compact` (compacts old chunks of a full-attention KV cache into S summary
-rows, re-rotating shifted keys via the K-shift graph; bare and hybrid
-attention+recurrent memories, incl. IMROPE text), plus the server's post-prefill,
-context-limit-stop, and pre-context-shift hooks — lives in the llama core
-(`include/llama-forthllm.h`,
-`src/forthllm.cpp`, C API `llama_forthllm_compact`). Validated end-to-end on
-Qwen3.8-27B (qwen35, hybrid, IMROPE): a 2196-token prompt compacted to 180 cells
-(16 chunks, 2016 freed) with a correct, coherent answer. Patch:
-`patches/llama-cpp-forthllm-kv-compaction.patch`. **MVP limitations**: MLA caches
-(DeepSeek-V4 — the user's model), `hybrid_iswa`/`hybrid_idx`, speculative slots, and
-the `squeezer`/`jl_dim` (carried but not yet used by the cache path — they attach to
-state save/load). `max_stack_depth`/`eviction` are wired (Phase 4b). This repo's
-`include/forthllm/` + `src/forthllm.cpp`
-(+ `squeezer`, `bwt`, `fm_index`, `jl_projector`) scaffold is now a faithful port of
-the tested llama.cpp engine (real summarize/stack/squeezer/BWT — no more `sin()`
-summaries or broken BWT invert; `test_forthllm` + `test_squeezer` pass) — Phase 4a
-done. (The `--llama-vm-*` flags are likewise absent from the
-current build — budgets go through the `LLAMA_VM_*` env vars.) The full assessment,
-the llama.cpp KV-cache API survey, and the phased implementation are in
-`llama-server-forthllm-investigation.md`.
+See [docs/forthllm.md](docs/forthllm.md) for the full ForthLLM status and design.
 
 ## Debugging notes
-- **A "stalled" llama-cli is usually the stdin-EOF prompt loop, not the GPU.** After
-  `--n-predict` is satisfied, llama-cli (without `--single-turn`) prints the `> ` prompt
-  and reads stdin; with stdin at EOF (nohup/background runs) it busy-loops printing the
-  prompt at ~40 MB/s (the process shows `R`, the output file grows by GBs, and the
-  compute log is frozen at the last op — all of which looks exactly like a GPU hang).
-  Check `ls -l /proc/<pid>/fd/0` and the tail of the output file before suspecting the
-  pager. This false alarm cost a full investigation once.
-- Corrupted-data failures: add temporary overlap checks over the page table (two pages with
-  overlapping `[off, off+size)` in one tier) — the corruption that bit us was a freed
-  shared arena block being reallocated, not a bad load.
-- `stats` (`get_stats()`) exposes faults/evictions/swap counters; `test_gguf` prints them
-  on success, which makes regressions (e.g. unexpected swap traffic) visible.
-- **After `git pull` in the llama.cpp clone, the ForthLLM patch can appear to "not fit"
-  when it actually applies fine.** The patch creates three *new* files
-  (`include/llama-forthllm.h`, `src/forthllm.cpp`, `tests/test-forthllm.cpp`); a pull
-  discards the tracked edits but leaves those untracked files behind, and `git apply`
-  refuses to create a file that already exists — so the whole patch is rejected with a
-  misleading context error. Fix: delete the three untracked files, re-run
-  `patches/apply-llama.cpp-patches.sh`, then rebuild the ggml libs + server in each
-  platform's build dir. (Hit on 2026-11-04 and again on 2026-11-05 after the pull to
-  `45b6604b2`, where both patches applied cleanly with no re-roll.)
-- **CUDA device indices are not nvidia-smi indices.** The wrapper's `LLAMA_VM_GPU=cudaN`
-  (and the VRAM window's device) select by the CUDA *runtime* device order, which on a
-  multi-GPU box can differ from `nvidia-smi`'s bus ordering. On the P6000/3060 box,
-  runtime `cuda0` = the RTX 3060 (12 GiB), `cuda1` = a P6000 (24 GiB) — the reverse of
-  what the nvidia-smi index suggests. A `cudaMalloc failed: out of memory` on a card
-  that `nvidia-smi` shows as mostly free usually means the window landed on the wrong
-  (smaller) device. Verify with a `cudaGetDeviceProperties` probe, not nvidia-smi.
+
+See [docs/debugging.md](docs/debugging.md) for detailed debugging notes, including:
+- "Stalled" llama-cli is usually the stdin-EOF prompt loop, not the GPU
+- Corrupted-data failures: add temporary overlap checks
+- Swap counter monitoring
+- After `git pull`, the ForthLLM patch can appear to "not fit"
+- CUDA device indices are not nvidia-smi indices
+- Swap bugs found and fixed
+- Eviction policy: LRU only
