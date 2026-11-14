@@ -1,3 +1,9 @@
+// SPDX-License-Identifier: MIT
+// Copyright (C) 2026 Alfred Leung
+//
+// FM-index implementation: space-efficient pattern matching using BWT and
+// rank/select data structures.
+
 #include "forthllm/squeezer.h"
 #include <algorithm>
 #include <map>

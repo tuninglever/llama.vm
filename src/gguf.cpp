@@ -1,3 +1,9 @@
+// SPDX-License-Identifier: MIT
+// Copyright (C) 2026 Alfred Leung
+//
+// GGUF model file backend: parses GGUF files (including sharded/split models),
+// extracts tensor metadata, and attaches tensors as pager regions.
+
 #include "pager-impl.h"
 
 #include "gguf.h"

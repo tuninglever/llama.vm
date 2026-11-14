@@ -1,3 +1,10 @@
+// SPDX-License-Identifier: MIT
+// Copyright (C) 2026 Alfred Leung
+//
+// llama.vm public API: pager configuration, types, and interface.
+// Manages LLM model weights across RAM/VRAM tiers with demand paging,
+// LRU eviction, and swap support.
+
 #pragma once
 
 #include <cstddef>

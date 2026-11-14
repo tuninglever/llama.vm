@@ -1,3 +1,9 @@
+// SPDX-License-Identifier: MIT
+// Copyright (C) 2026 Alfred Leung
+//
+// Burrows-Wheeler Transform implementation: reversible permutation for improved
+// compressibility, with exact invert via LF mapping.
+
 #include "forthllm/squeezer.h"
 
 #include <algorithm>

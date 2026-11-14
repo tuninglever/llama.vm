@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: MIT
+// Copyright (C) 2026 Alfred Leung
+
 // llama.vm GPU weight buffer + wrapper backend (LLAMA_VM_GPU).
 //
 // The LLAMA_VM_GPU buffer_type holds model weights that are larger than the

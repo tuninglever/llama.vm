@@ -1,3 +1,9 @@
+// SPDX-License-Identifier: MIT
+// Copyright (C) 2026 Alfred Leung
+//
+// Per-tier fixed-size allocator with first-fit allocation and free block
+// coalescing. 4 KiB aligned, used for managing page slices within each tier.
+
 #pragma once
 
 #include <algorithm>

@@ -1,3 +1,9 @@
+// SPDX-License-Identifier: MIT
+// Copyright (C) 2026 Alfred Leung
+//
+// llama-vm CLI tool: info, verify, bench, pages, plan, tiered, demo
+// Usage: ./llama-vm <command> [options]
+
 #include "llama_vm/llama_vm.h"
 
 #include <chrono>

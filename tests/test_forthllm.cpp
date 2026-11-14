@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: MIT
+// Copyright (C) 2026 Alfred Leung
+
 #include "forthllm/forthllm.h"
 
 #include <cassert>

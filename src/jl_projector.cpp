@@ -1,3 +1,9 @@
+// SPDX-License-Identifier: MIT
+// Copyright (C) 2026 Alfred Leung
+//
+// Johnson-Lindenstrauss projector implementation: random dimensionality
+// reduction that approximately preserves pairwise distances.
+
 #include "forthllm/squeezer.h"
 
 #include <cmath>

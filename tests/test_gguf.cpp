@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: MIT
+// Copyright (C) 2026 Alfred Leung
+
 #include "llama_vm/llama_vm.h"
 
 #include "gguf.h"

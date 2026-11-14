@@ -1,3 +1,9 @@
+// SPDX-License-Identifier: MIT
+// Copyright (C) 2026 Alfred Leung
+//
+// ForthLLM engine implementation: chunked KV-row summarization (attention/mean/last),
+// stack management with LRU/LFU/fixed-window eviction, and config validation.
+
 #include "forthllm/forthllm.h"
 
 #include <algorithm>

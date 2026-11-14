@@ -1,3 +1,9 @@
+// SPDX-License-Identifier: MIT
+// Copyright (C) 2026 Alfred Leung
+//
+// VRAM tier backend interface: initializes a ggml backend buffer for device
+// memory management and provides copy operations for page data.
+
 #pragma once
 
 #include <cstddef>

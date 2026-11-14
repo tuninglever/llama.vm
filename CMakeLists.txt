@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: MIT
+# Copyright (C) 2026 Alfred Leung
+
 cmake_minimum_required(VERSION 3.16)
 project(llama-vm VERSION 0.1.0 LANGUAGES CXX)
 

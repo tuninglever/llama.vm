@@ -1,3 +1,9 @@
+// SPDX-License-Identifier: MIT
+// Copyright (C) 2026 Alfred Leung
+//
+// Pager implementation: page table management, fault handling, LRU eviction,
+// swap I/O, prefetch worker, and tier coordination.
+
 #include "pager-impl.h"
 #include "vram.h"
 

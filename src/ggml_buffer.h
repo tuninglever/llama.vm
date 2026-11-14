@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: MIT
+// Copyright (C) 2026 Alfred Leung
+
 #pragma once
 
 // llama.vm ggml buffer: a host ggml buffer_type backed by a llama_vm::pager.

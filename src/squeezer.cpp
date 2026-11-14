@@ -1,3 +1,9 @@
+// SPDX-License-Identifier: MIT
+// Copyright (C) 2026 Alfred Leung
+//
+// ForthLLM squeezer implementation: lossy compression of KV summary rows using
+// Johnson-Lindenstrauss projection, 8-bit quantization, and BWT.
+
 #include "forthllm/squeezer.h"
 
 #include <algorithm>

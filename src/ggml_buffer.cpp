@@ -1,3 +1,9 @@
+// SPDX-License-Identifier: MIT
+// Copyright (C) 2026 Alfred Leung
+//
+// ggml buffer backend implementation: a host buffer_type backed by a llama_vm::pager.
+// Manages tensor placement, data transfers, and integration with llama.cpp's allocator.
+
 #include "ggml_buffer.h"
 #include "ggml-backend-impl.h"
 #include "vm_env.h"

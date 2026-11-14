@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: MIT
+// Copyright (C) 2026 Alfred Leung
+
 // Standalone dlopen-able backend shim (libggml-llamavm-gpu.so).
 //
 // Thin wrapper so that llama.cpp can load the llama.vm GPU weight buffer + wrapper

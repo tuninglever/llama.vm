@@ -1,3 +1,9 @@
+// SPDX-License-Identifier: MIT
+// Copyright (C) 2026 Alfred Leung
+//
+// Pager internal implementation details: page table structure, LRU lists,
+// prefetch queue, and swap bitmap.
+
 #pragma once
 
 #include "llama_vm/llama_vm.h"

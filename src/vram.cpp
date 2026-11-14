@@ -1,3 +1,10 @@
+// SPDX-License-Identifier: MIT
+// Copyright (C) 2026 Alfred Leung
+//
+// VRAM tier backend implementation: initializes ggml backend buffers for
+// various GPU architectures (HIP, CUDA, Vulkan, CPU) and manages device
+// memory allocation and data transfers.
+
 #include "vram.h"
 #include "pager-impl.h"
 
