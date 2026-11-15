@@ -126,6 +126,25 @@ curl -s http://127.0.0.1:8123/completion \
 | `LLAMA_VM_GPU` | Inner compute backend: `auto\|hip\|cuda\|vulkan\|cpu` + optional device index (`cuda1` = second CUDA device) |
 | `LLAMA_VM_BACKEND_DIR` | Directory containing the inner backend's .so (if not in the llama.cpp build) |
 
+## Sizing Your Tiers
+
+The `llama-vm` CLI includes a capacity planner that tells you what budget to use for a given model:
+
+```bash
+# Compute recommended tier sizes for a model
+./build/llama-vm plan /path/to/model.gguf
+
+# With specific available memory
+./build/llama-vm plan /path/to/model.gguf --ram 32G --vram 8G
+```
+
+Output:
+```
+tier sizes: ram=28G vram=0G total=28G fits=true
+```
+
+Use these numbers to set `LLAMA_VM_RAM` and `LLAMA_VM_VRAM`. If you see a "tier capacity is too small" error, your tier is undersized — use the planner to find the right values.
+
 ## Key Considerations
 
 - **Window sizing:** `LLAMA_VM_VRAM` must be at least the largest *plain* tensor of the model (e.g. `token_embd.weight` / `output.weight`); a window below it throws at the first fault. MoE expert tensors are paged as per-expert slices, so the window does not need to hold a whole expert tensor.
